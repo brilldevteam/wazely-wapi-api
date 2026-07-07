@@ -144,6 +144,49 @@ const validateAndFilterIds = (ids) => {
     };
 };
 
+const buildDuplicateAgentQuery = ({ email, phone, ownerId, excludeId = null }) => {
+    const query = {
+        $or: [
+            { email },
+            { phone, created_by: ownerId }
+        ]
+    };
+
+    if (excludeId) {
+        query._id = { $ne: excludeId };
+    }
+
+    return query;
+};
+
+const getDuplicateAgentMessage = (duplicateAgent, normalizedEmail) => {
+    if (duplicateAgent?.email === normalizedEmail) {
+        return 'A user with this email already exists';
+    }
+
+    return 'AGENT with this phone already exists';
+};
+
+const duplicateKeyResponse = (error, res) => {
+    if (error?.code !== 11000) {
+        return null;
+    }
+
+    const duplicateField = Object.keys(error.keyPattern || error.keyValue || {})[0];
+    const fieldLabel = duplicateField === 'email'
+        ? 'email'
+        : duplicateField === 'phone'
+            ? 'phone'
+            : 'value';
+
+    return res.status(409).json({
+        success: false,
+        message: `A user with this ${fieldLabel} already exists`
+    });
+};
+
+const getOwnerId = (user) => user?.owner_id || user?._id || user?.id;
+
 export const getAllAgents = async (req, res) => {
     try {
         const { page, limit, skip } = parsePaginationParams(req.query);
@@ -202,6 +245,9 @@ export const createAgent = async (req, res) => {
     try {
 
         const { name, email, password, note, country_code, phone, team_id, status, is_phoneno_hide } = req.body;
+        const normalizedEmail = email?.trim().toLowerCase();
+        const normalizedPhone = phone?.trim();
+        const ownerId = getOwnerId(req.user);
 
         const validation = validateAgentData({ name, email, password, country_code, phone, team_id }, false);
         if (!validation.isValid) {
@@ -211,9 +257,17 @@ export const createAgent = async (req, res) => {
             });
         }
 
+        if (!mongoose.Types.ObjectId.isValid(team_id)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Valid Team ID is required'
+            });
+        }
+
         const team = await Team.findOne({
             _id: team_id,
-            user_id: req.user._id
+            user_id: ownerId,
+            deleted_at: null
         });
 
         if (!team) {
@@ -234,33 +288,29 @@ export const createAgent = async (req, res) => {
             });
         }
 
-        const duplicateQuery = {
-            $or: [
-                { email: email },
-                { phone: phone }
-            ],
-            created_by: req.user._id
-        };
-
-        const duplicateAgent = await User.findOne(duplicateQuery);
+        const duplicateAgent = await User.findOne(buildDuplicateAgentQuery({
+            email: normalizedEmail,
+            phone: normalizedPhone,
+            ownerId
+        }));
 
         if (duplicateAgent) {
             return res.status(409).json({
                 success: false,
-                message: 'AGENT with this email or phone already exists'
+                message: getDuplicateAgentMessage(duplicateAgent, normalizedEmail)
             });
         }
         const hashedPassword = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
 
         const newAgent = await User.create({
             name: name.trim(),
-            email: email.trim(),
+            email: normalizedEmail,
             password: hashedPassword,
             note: note ? note.trim() : null,
             country_code: country_code,
-            phone: phone.trim(),
+            phone: normalizedPhone,
             team_id: (team_id && mongoose.Types.ObjectId.isValid(team_id)) ? team_id : null,
-            created_by: req.user._id,
+            created_by: ownerId,
             role_id: role._id,
             is_phoneno_hide: is_phoneno_hide,
             status: status !== undefined ? status : true
@@ -273,6 +323,9 @@ export const createAgent = async (req, res) => {
         });
     } catch (error) {
         console.error('Error creating AGENT:', error);
+        const response = duplicateKeyResponse(error, res);
+        if (response) return response;
+
         return res.status(500).json({
             success: false,
             message: 'Failed to create AGENT',
@@ -330,32 +383,27 @@ export const updateAgent = async (req, res) => {
             });
         }
 
-        const duplicateQuery = {
-            _id: { $ne: id },
-            $or: [
-                { email: email },
-                { phone: phone }
-            ]
-        };
-
-        if (req.user.role !== 'super_admin') {
-            duplicateQuery.created_by = req.user._id;
-        }
-
-        const duplicateAgent = await User.findOne(duplicateQuery);
+        const normalizedEmail = email?.trim().toLowerCase();
+        const normalizedPhone = phone?.trim();
+        const duplicateAgent = await User.findOne(buildDuplicateAgentQuery({
+            email: normalizedEmail,
+            phone: normalizedPhone,
+            ownerId: existingAgent.created_by || req.user._id,
+            excludeId: id
+        }));
 
         if (duplicateAgent) {
             return res.status(409).json({
                 success: false,
-                message: 'AGENT with this email or phone already exists'
+                message: getDuplicateAgentMessage(duplicateAgent, normalizedEmail)
             });
         }
 
         existingAgent.name = name.trim();
-        existingAgent.email = email.trim();
-        existingAgent.note = note.trim();
+        existingAgent.email = normalizedEmail;
+        existingAgent.note = note ? note.trim() : null;
         existingAgent.country_code = country_code;
-        existingAgent.phone = phone.trim();
+        existingAgent.phone = normalizedPhone;
         existingAgent.is_phoneno_hide = is_phoneno_hide;
         existingAgent.team_id = (team_id && mongoose.Types.ObjectId.isValid(team_id)) ? team_id : existingAgent.team_id;
         existingAgent.created_by = existingAgent.created_by || req.user._id;
@@ -378,6 +426,9 @@ export const updateAgent = async (req, res) => {
         });
     } catch (error) {
         console.error('Error updating AGENT:', error);
+        const response = duplicateKeyResponse(error, res);
+        if (response) return response;
+
         return res.status(500).json({
             success: false,
             message: 'Failed to update AGENT',
