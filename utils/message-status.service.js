@@ -2,7 +2,7 @@ import Message from '../models/message.model.js';
 import { updateCampaignStatsFromMessage } from './campaign-stats.service.js';
 
 
-export const updateDeliveryStatus = async (messageId, status, timestamp = null) => {
+export const updateDeliveryStatus = async (messageId, status, timestamp = null, failureReason = null) => {
   try {
     const updateData = {
       delivery_status: status,
@@ -15,6 +15,9 @@ export const updateDeliveryStatus = async (messageId, status, timestamp = null) 
       updateData.delivered_at = timestamp || new Date();
     } else if (status === 'failed') {
       updateData.is_delivered = false;
+      if (failureReason) {
+        updateData['metadata.error'] = failureReason;
+      }
     }
 
     const updatedMessage = await Message.findByIdAndUpdate(
@@ -29,7 +32,7 @@ export const updateDeliveryStatus = async (messageId, status, timestamp = null) 
 
     try {
       const { updateCampaignStatsFromMessage } = await import('./campaign-stats.service.js');
-      const result = await updateCampaignStatsFromMessage(messageId, status, timestamp);
+      const result = await updateCampaignStatsFromMessage(messageId, status, timestamp, failureReason);
       console.log(`Campaign stats update result for message ${messageId}:`, result);
     } catch (campaignError) {
       console.error('Error updating campaign stats:', campaignError);
@@ -82,7 +85,7 @@ export const updateReadStatus = async (messageId, status, timestamp = null) => {
 };
 
 
-export const updateWhatsAppStatus = async (waMessageId, status, timestamp = null) => {
+export const updateWhatsAppStatus = async (waMessageId, status, timestamp = null, failureReason = null) => {
   try {
     if (!waMessageId) {
       throw new Error('WhatsApp message ID is required');
@@ -110,6 +113,9 @@ export const updateWhatsAppStatus = async (waMessageId, status, timestamp = null
       case 'failed':
         updateData.delivery_status = 'failed';
         updateData.is_delivered = false;
+        if (failureReason) {
+          updateData['metadata.error'] = failureReason;
+        }
         break;
     }
 
@@ -150,7 +156,7 @@ export const updateWhatsAppStatus = async (waMessageId, status, timestamp = null
 
     try {
       const { updateCampaignStatsFromMessage } = await import('./campaign-stats.service.js');
-      await updateCampaignStatsFromMessage(updatedMessage._id.toString(), status, timestamp);
+      await updateCampaignStatsFromMessage(updatedMessage._id.toString(), status, timestamp, failureReason);
     } catch (campaignError) {
       console.error('Error updating campaign stats:', campaignError);
     }

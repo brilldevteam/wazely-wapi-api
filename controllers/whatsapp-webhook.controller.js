@@ -21,6 +21,26 @@ import omnichannelService from '../services/messaging/omnichannel.service.js';
 const processedMids = new Set();
 setInterval(() => processedMids.clear(), 60000);
 
+const formatWhatsAppStatusError = (errors = []) => {
+  if (!Array.isArray(errors) || errors.length === 0) {
+    return null;
+  }
+
+  return errors
+    .map((error) => {
+      const parts = [
+        error.code ? `Code ${error.code}` : null,
+        error.title,
+        error.message,
+        error.error_data?.details
+      ].filter(Boolean);
+
+      return parts.join(': ');
+    })
+    .filter(Boolean)
+    .join(' | ');
+};
+
 
 export const handleWebhookVerification = async (req, res) => {
   console.log("called");
@@ -1592,11 +1612,14 @@ export const handleStatusUpdate = async (req, res, io = null) => {
     const waMessageId = status.id;
     const statusType = status.status;
     const timestamp = new Date(Number(status.timestamp) * 1000);
+    const failureReason = statusType === 'failed'
+      ? formatWhatsAppStatusError(status.errors) || 'WhatsApp reported message failed'
+      : null;
 
     console.log(`Processing status update for message ${waMessageId}: ${statusType}`);
 
     try {
-      const updatedMessage = await updateWhatsAppStatus(waMessageId, statusType, timestamp);
+      const updatedMessage = await updateWhatsAppStatus(waMessageId, statusType, timestamp, failureReason);
 
       if (io && updatedMessage) {
         const populatedMessage = await Message.findById(updatedMessage._id)
@@ -1646,7 +1669,7 @@ export const handleStatusUpdate = async (req, res, io = null) => {
 
       try {
         const { updateCampaignStatsFromWhatsApp } = await import('../utils/campaign-stats.service.js');
-        const result = await updateCampaignStatsFromWhatsApp(waMessageId, statusType, timestamp);
+        const result = await updateCampaignStatsFromWhatsApp(waMessageId, statusType, timestamp, failureReason);
         console.log(`Campaign stats update result for ${waMessageId}:`, result);
       } catch (campaignError) {
         console.error(`Error updating campaign stats for message ${waMessageId}:`, campaignError);
