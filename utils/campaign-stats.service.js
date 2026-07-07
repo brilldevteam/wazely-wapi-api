@@ -4,7 +4,7 @@ import mongoose from 'mongoose';
 
 
 
-export const updateCampaignStatsFromMessage = async (messageId, newStatus, timestamp = null) => {
+export const updateCampaignStatsFromMessage = async (messageId, newStatus, timestamp = null, failureReason = null) => {
   try {
     const message = await Message.findById(messageId)
       .select('template_id metadata recipient_number contact_id user_id')
@@ -53,6 +53,7 @@ export const updateCampaignStatsFromMessage = async (messageId, newStatus, times
       case 'failed':
         statusUpdate.status = 'failed';
         statusUpdate.failed_at = timestamp || new Date();
+        statusUpdate.failure_reason = failureReason || message.metadata?.error || 'WhatsApp reported message failed';
         campaignStatsUpdate.failed_count = (campaign.stats.failed_count || 0) + 1;
         campaignStatsUpdate.pending_count = Math.max(0, (campaign.stats.pending_count || 0) - 1);
         break;
@@ -122,11 +123,37 @@ export const updateCampaignStatsFromMessage = async (messageId, newStatus, times
     if (statusUpdate.failed_at) {
       recipientUpdate.$set["recipients.$.failed_at"] = statusUpdate.failed_at;
     }
+    if (statusUpdate.failure_reason) {
+      recipientUpdate.$set["recipients.$.failure_reason"] = statusUpdate.failure_reason;
+    }
 
     await Campaign.updateOne(
       recipientQuery,
       recipientUpdate
     );
+
+    if (newStatus === 'failed' && statusUpdate.failure_reason) {
+      const duplicateError = currentCampaign.error_log?.some(log =>
+        (message.contact_id ? log.contact_id?.toString() === message.contact_id.toString() : log.phone_number === message.recipient_number) &&
+        log.error === statusUpdate.failure_reason
+      );
+
+      if (!duplicateError) {
+        await Campaign.updateOne(
+          { _id: campaignId },
+          {
+            $push: {
+              error_log: {
+                timestamp: timestamp || new Date(),
+                contact_id: message.contact_id || null,
+                phone_number: message.recipient_number,
+                error: statusUpdate.failure_reason
+              }
+            }
+          }
+        );
+      }
+    }
 
     let updatedCampaign;
     if (shouldIncrementStats) {
@@ -280,7 +307,7 @@ export const getCampaignStats = async (campaignId) => {
 };
 
 
-export const updateCampaignStatsFromWhatsApp = async (waMessageId, status, timestamp = null) => {
+export const updateCampaignStatsFromWhatsApp = async (waMessageId, status, timestamp = null, failureReason = null) => {
   try {
     const message = await Message.findOne({ wa_message_id: waMessageId })
       .select('_id metadata')
@@ -313,7 +340,8 @@ export const updateCampaignStatsFromWhatsApp = async (waMessageId, status, times
     return await updateCampaignStatsFromMessage(
       message._id.toString(),
       internalStatus,
-      timestamp
+      timestamp,
+      failureReason
     );
 
   } catch (error) {
