@@ -125,6 +125,50 @@
     "content": "<p>Hello {{user_name}},</p><p>Your password has been successfully reset. If you did not make this change, please contact support immediately.</p>"
   },
   {
+    "name": "Account Credentials",
+    "description": "Sent when an administrator or user creates a new user or agent account.",
+    "slug": "account-credentials",
+    "shortcodes": [
+      {
+        "type": "variable",
+        "text": "User Name",
+        "action": "{{user_name}}"
+      },
+      {
+        "type": "variable",
+        "text": "User Email",
+        "action": "{{user_email}}"
+      },
+      {
+        "type": "variable",
+        "text": "Temporary Password",
+        "action": "{{user_password}}"
+      },
+      {
+        "type": "variable",
+        "text": "User Role",
+        "action": "{{user_role}}"
+      },
+      {
+        "type": "variable",
+        "text": "Team Name",
+        "action": "{{team_name}}"
+      },
+      {
+        "type": "variable",
+        "text": "Login URL",
+        "action": "{{login_url}}"
+      },
+      {
+        "type": "variable",
+        "text": "Company Name",
+        "action": "{{company_name}}"
+      }
+    ],
+    "subject": "Your {{company_name}} login credentials",
+    "content": "<p>Hello {{user_name}},</p><p>Your {{company_name}} {{user_role}} account has been created.</p><p><strong>Login URL:</strong> <a href=\"{{login_url}}\">{{login_url}}</a></p><p><strong>Email:</strong> {{user_email}}<br><strong>Temporary Password:</strong> {{user_password}}</p><p>Please sign in and change your password after your first login.</p>"
+  },
+  {
     "name": "Plan Activation",
     "description": "Sent when a user successfully subscribes to a new plan.",
     "slug": "plan-activation",
