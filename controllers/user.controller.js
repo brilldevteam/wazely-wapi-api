@@ -3,6 +3,8 @@ import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { User, Subscription, Plan, Role, Setting, Contact } from "../models/index.js";
 import { sendMail } from "../utils/mail.js";
+import { sendAccountCredentialsEmail } from "../utils/account-credentials-email.js";
+import { retireDeletedUsersWithEmail, retireUserEmail } from "../utils/user-email-lifecycle.js";
 
 const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 10;
@@ -685,6 +687,8 @@ export const createUser = async (req, res) => {
     const trimmedName = name.trim();
     const trimmedPhone = phone ? phone.trim() : null;
 
+    await retireDeletedUsersWithEmail(User, normalizedEmail);
+
     const existingUser = await User.findOne({
       email: normalizedEmail,
       deleted_at: null,
@@ -771,9 +775,19 @@ export const createUser = async (req, res) => {
       });
     }
 
+    const credentialsEmailSent = await sendAccountCredentialsEmail({
+      name: newUser.name,
+      email: newUser.email,
+      password,
+      role: roleDoc.name || "user",
+    });
+
     return res.status(201).json({
       success: true,
-      message: "User created successfully",
+      message: credentialsEmailSent
+        ? "User created successfully and credentials email sent"
+        : "User created successfully, but credentials email could not be sent",
+      credentials_email_sent: credentialsEmailSent,
       data: userResponse,
     });
   } catch (error) {
@@ -803,7 +817,7 @@ export const deleteUsers = async (req, res) => {
     const existingUsers = await User.find({
       _id: { $in: validIds },
       deleted_at: null,
-    }).select("_id");
+    }).select("_id email");
 
     if (existingUsers.length === 0) {
       return res.status(404).json({
@@ -819,9 +833,19 @@ export const deleteUsers = async (req, res) => {
 
     const now = new Date();
 
-    const deleteResult = await User.updateMany(
-      { _id: { $in: foundIds } },
-      { $set: { deleted_at: now, status: false } },
+    const deleteResult = await User.bulkWrite(
+      existingUsers.map((user) => ({
+        updateOne: {
+          filter: { _id: user._id },
+          update: {
+            $set: {
+              deleted_at: now,
+              status: false,
+              email: retireUserEmail(user.email, user._id),
+            },
+          },
+        },
+      })),
     );
 
     const response = {

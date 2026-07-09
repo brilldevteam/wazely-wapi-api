@@ -2,6 +2,8 @@ import { User, Team, Role } from '../models/index.js';
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import * as funnelService from '../services/funnel.service.js';
+import { sendAccountCredentialsEmail } from '../utils/account-credentials-email.js';
+import { retireDeletedUsersWithEmail } from '../utils/user-email-lifecycle.js';
 
 
 const DEFAULT_PAGE = 1;
@@ -146,6 +148,7 @@ const validateAndFilterIds = (ids) => {
 
 const buildDuplicateAgentQuery = ({ email, phone, ownerId, excludeId = null }) => {
     const query = {
+        deleted_at: null,
         $or: [
             { email },
             { phone, created_by: ownerId }
@@ -288,6 +291,8 @@ export const createAgent = async (req, res) => {
             });
         }
 
+        await retireDeletedUsersWithEmail(User, normalizedEmail);
+
         const duplicateAgent = await User.findOne(buildDuplicateAgentQuery({
             email: normalizedEmail,
             phone: normalizedPhone,
@@ -316,10 +321,23 @@ export const createAgent = async (req, res) => {
             status: status !== undefined ? status : true
         });
 
+        const credentialsEmailSent = await sendAccountCredentialsEmail({
+            name: newAgent.name,
+            email: newAgent.email,
+            password,
+            role: 'agent',
+            teamName: team.name || ''
+        });
+        const agentResponse = newAgent.toObject();
+        delete agentResponse.password;
+
         return res.status(201).json({
             success: true,
-            message: 'AGENT created successfully',
-            data: newAgent
+            message: credentialsEmailSent
+                ? 'AGENT created successfully and credentials email sent'
+                : 'AGENT created successfully, but credentials email could not be sent',
+            credentials_email_sent: credentialsEmailSent,
+            data: agentResponse
         });
     } catch (error) {
         console.error('Error creating AGENT:', error);
