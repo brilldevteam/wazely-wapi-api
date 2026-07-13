@@ -472,6 +472,24 @@ export const createCampaign = async (req, res) => {
     const requestBaseUrl = `${forwardedProtocol || req.protocol}://${forwardedHost || req.get('host')}`;
     const baseUrl = requestBaseUrl || process.env.APP_URL || '';
     const carouselUploadedFiles = req.files && req.files['carousel_files'] ? req.files['carousel_files'] : [];
+    let carouselFileIndexes = [];
+    if (req.body.carousel_file_indexes) {
+      try {
+        carouselFileIndexes = typeof req.body.carousel_file_indexes === 'string'
+          ? JSON.parse(req.body.carousel_file_indexes)
+          : req.body.carousel_file_indexes;
+      } catch {
+        return res.status(400).json({ error: 'Invalid carousel file index mapping.' });
+      }
+    }
+
+    if (!Array.isArray(carouselFileIndexes)) {
+      return res.status(400).json({ error: 'Carousel file index mapping must be an array.' });
+    }
+    if (carouselFileIndexes.length > 0 && carouselFileIndexes.length !== carouselUploadedFiles.length) {
+      return res.status(400).json({ error: 'Some carousel media files were not uploaded. Please select the card media again.' });
+    }
+
     let finalMediaUrl = media_url;
     if (uploadedFileUrl) {
       finalMediaUrl = uploadedFileUrl.path.startsWith('http')
@@ -485,8 +503,21 @@ export const createCampaign = async (req, res) => {
     let resolvedCarouselCardsData = carouselCardsData;
     if (carouselUploadedFiles.length > 0) {
       const parsed = Array.isArray(resolvedCarouselCardsData) ? resolvedCarouselCardsData : (typeof resolvedCarouselCardsData === 'string' ? JSON.parse(resolvedCarouselCardsData) : []);
+      const fileByCardIndex = new Map();
+      carouselUploadedFiles.forEach((file, fileIndex) => {
+        const cardIndex = carouselFileIndexes.length > 0 ? Number(carouselFileIndexes[fileIndex]) : fileIndex;
+        if (!Number.isInteger(cardIndex) || cardIndex < 0 || cardIndex >= parsed.length || fileByCardIndex.has(cardIndex)) {
+          return;
+        }
+        fileByCardIndex.set(cardIndex, file);
+      });
+
+      if (fileByCardIndex.size !== carouselUploadedFiles.length) {
+        return res.status(400).json({ error: 'Carousel media files could not be matched to their cards.' });
+      }
+
       resolvedCarouselCardsData = await Promise.all(parsed.map(async (card, index) => {
-        const file = carouselUploadedFiles[index];
+        const file = fileByCardIndex.get(index);
         if (file) {
           let fullLink = file.path.startsWith('http')
             ? file.path
@@ -497,13 +528,37 @@ export const createCampaign = async (req, res) => {
           return {
             ...card,
             header: {
-              type: file.mimetype.startsWith('video/') ? 'video' : 'image',
+              type: getWhatsAppTypeFromMime(file.mimetype),
               link: fullLink
             }
           };
         }
         return card;
       }));
+    }
+
+    if (templateType === 'carousel_media') {
+      for (let index = 0; index < (resolvedCarouselCardsData || []).length; index += 1) {
+        const card = resolvedCarouselCardsData[index];
+        const link = String(card?.header?.link || '');
+        const hasMediaId = Boolean(card?.header?.id);
+        if (!hasMediaId && (!/^https?:\/\//i.test(link) || /^blob:/i.test(link))) {
+          return res.status(400).json({
+            error: `Carousel card ${index + 1} requires an uploaded file or a public HTTP(S) media URL.`
+          });
+        }
+
+        const templateHeader = template.carousel_cards?.[index]?.components?.find(
+          (component) => String(component.type || '').toLowerCase() === 'header'
+        );
+        const expectedType = String(templateHeader?.format || '').toLowerCase();
+        const actualType = String(card?.header?.type || '').toLowerCase();
+        if (expectedType && actualType && expectedType !== actualType) {
+          return res.status(400).json({
+            error: `Carousel card ${index + 1} requires ${expectedType} media, but ${actualType} was selected.`
+          });
+        }
+      }
     }
 
     const campaign = await Campaign.create({
