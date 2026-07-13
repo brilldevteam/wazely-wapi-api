@@ -1840,6 +1840,7 @@ export const updateTemplate = async (req, res) => {
       }
     }
 
+    const previousTemplateSnapshot = template.toObject({ depopulate: true });
     const updatedLocalTemplate = await Template.findByIdAndUpdate(
       id,
       updateData,
@@ -1849,6 +1850,7 @@ export const updateTemplate = async (req, res) => {
     const shouldUpdateOnMeta = req.body.should_update_on_meta ?? true === true;
 
     if (shouldUpdateOnMeta && template.platform === "whatsapp" && waba) {
+      let metaUpdateApplied = false;
       try {
         const wabaId = waba.whatsapp_business_account_id;
         const accessToken = waba.access_token;
@@ -1866,6 +1868,7 @@ export const updateTemplate = async (req, res) => {
             components,
             accessToken
           );
+          metaUpdateApplied = true;
 
           const newStatus = updateResponse.status
             ? String(updateResponse.status).toLowerCase()
@@ -1897,6 +1900,7 @@ export const updateTemplate = async (req, res) => {
         } else {
           const metaPayload = buildMetaTemplatePayload(updatedLocalTemplate);
           const createResponse = await submitTemplateToMeta(metaPayload, wabaId, accessToken);
+          metaUpdateApplied = true;
 
           await Template.findByIdAndUpdate(id, {
             meta_template_id: createResponse.id || createResponse.name,
@@ -1926,13 +1930,20 @@ export const updateTemplate = async (req, res) => {
       } catch (metaError) {
         console.error("Error updating Meta template:", metaError.response?.data || metaError.message);
         console.error("Full error response:", JSON.stringify(metaError.response?.data, null, 2));
+        if (!metaUpdateApplied) {
+          try {
+            await Template.replaceOne({ _id: id }, previousTemplateSnapshot);
+          } catch (rollbackError) {
+            console.error("Failed to roll back local template after Meta error:", rollbackError.message);
+          }
+        }
         return res.status(400).json({
           success: false,
           message: metaError.response?.data?.error?.error_user_msg || metaError.message,
           error: metaError.response?.data?.error?.message || metaError.message,
           error_details: metaError.response?.data || null,
-          local_template_updated: true,
-          data: updatedLocalTemplate,
+          local_template_updated: metaUpdateApplied,
+          data: await Template.findById(id),
         });
       }
     } else {
