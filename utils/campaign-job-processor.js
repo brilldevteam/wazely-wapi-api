@@ -674,9 +674,15 @@ export const processCampaignMessageJob = async (jobData) => {
         }]
       });
     } else if (templateData.media_url) {
-      let mediaType = 'image';
-      if (templateData.media_url.endsWith('.mp4') || templateData.media_url.includes('video')) mediaType = 'video';
-      if (templateData.media_url.endsWith('.pdf') || templateData.media_url.includes('document')) mediaType = 'document';
+      const templateMediaType = template?.header?.format === 'media'
+        ? String(template.header.media_type || '').toLowerCase()
+        : '';
+      let mediaType = ['image', 'video', 'document'].includes(templateMediaType)
+        ? templateMediaType
+        : 'image';
+      const mediaPath = templateData.media_url.split('?')[0].split('#')[0].toLowerCase();
+      if (!templateMediaType && /\.(mp4|webm|mov|avi|mkv)$/.test(mediaPath)) mediaType = 'video';
+      if (!templateMediaType && /\.(pdf|docx?|xlsx?|pptx?|txt|csv)$/.test(mediaPath)) mediaType = 'document';
 
       templateComponents.push({
         type: 'header',

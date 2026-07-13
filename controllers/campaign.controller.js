@@ -14,6 +14,48 @@ const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 100;
 
+const inferMediaTypeFromUrl = (url) => {
+  if (!url || typeof url !== 'string') return null;
+  const pathname = url.split('?')[0].split('#')[0].toLowerCase();
+  if (/\.(jpe?g|png|gif|webp|svg)$/.test(pathname)) return 'image';
+  if (/\.(mp4|webm|mov|avi|mkv)$/.test(pathname)) return 'video';
+  if (/\.(pdf|docx?|xlsx?|pptx?|txt|csv)$/.test(pathname)) return 'document';
+  return null;
+};
+
+const fetchMetaTemplateMediaType = async (template, waba) => {
+  if (!template?.meta_template_id || !waba?.access_token) return null;
+
+  const templateId = String(template.meta_template_id);
+  let url;
+  if (/^\d+$/.test(templateId)) {
+    url = `https://graph.facebook.com/${API_VERSION}/${templateId}?fields=id,name,status,components`;
+  } else {
+    const params = new URLSearchParams({
+      fields: 'id,name,status,components',
+      name: template.template_name,
+    });
+    url = `https://graph.facebook.com/${API_VERSION}/${waba.whatsapp_business_account_id}/message_templates?${params}`;
+  }
+
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${waba.access_token}` },
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error?.message || 'Unable to verify template with Meta');
+  }
+
+  const metaTemplate = Array.isArray(payload.data)
+    ? payload.data.find((item) => item.name === template.template_name) || payload.data[0]
+    : payload;
+  const header = (metaTemplate?.components || []).find(
+    (component) => String(component.type || '').toUpperCase() === 'HEADER'
+  );
+  const format = String(header?.format || '').toLowerCase();
+  return ['image', 'video', 'document'].includes(format) ? format : null;
+};
+
 const parsePaginationParams = (query) => {
   const page = Math.max(1, parseInt(query.page) || DEFAULT_PAGE);
   const limit = Math.max(1, Math.min(MAX_LIMIT, parseInt(query.limit) || DEFAULT_LIMIT));
@@ -124,6 +166,7 @@ export const createCampaign = async (req, res) => {
     }
 
     let waba_id_obj = null;
+    let selectedWaba = null;
     if (platform === 'whatsapp') {
       let wabaQuery = {
         user_id: userId,
@@ -148,6 +191,7 @@ export const createCampaign = async (req, res) => {
         return res.status(404).json({ error: 'WhatsApp WABA not found' });
       }
 
+      selectedWaba = waba;
       waba_id_obj = waba._id.toString();
     }
 
@@ -197,6 +241,44 @@ export const createCampaign = async (req, res) => {
     }
 
     template_id = template._id.toString();
+
+    if (platform === 'whatsapp' && template.meta_template_id && selectedWaba) {
+      try {
+        const metaMediaType = await fetchMetaTemplateMediaType(template, selectedWaba);
+        if (metaMediaType && (
+          template.header?.format !== 'media' ||
+          String(template.header?.media_type || '').toLowerCase() !== metaMediaType
+        )) {
+          template.set('header.format', 'media');
+          template.set('header.media_type', metaMediaType);
+          await template.save();
+        }
+      } catch (error) {
+        return res.status(502).json({
+          error: `Could not verify the selected template with Meta: ${error.message}`
+        });
+      }
+    }
+
+    const uploadedFileUrl = req.file || (req.files && req.files['file_url'] ? req.files['file_url'][0] : null);
+    const expectedMediaType = template.header?.format === 'media'
+      ? String(template.header.media_type || '').toLowerCase()
+      : null;
+    const selectedMediaType = uploadedFileUrl
+      ? getWhatsAppTypeFromMime(uploadedFileUrl.mimetype)
+      : inferMediaTypeFromUrl(media_url);
+
+    if (expectedMediaType && selectedMediaType && expectedMediaType !== selectedMediaType) {
+      return res.status(400).json({
+        error: `This template requires ${expectedMediaType} media, but the selected file is ${selectedMediaType}.`
+      });
+    }
+
+    if (expectedMediaType && !uploadedFileUrl && !media_url) {
+      return res.status(400).json({
+        error: `A ${expectedMediaType} file or public URL is required for this template.`
+      });
+    }
 
     const templateType = (template.template_type || '').toLowerCase();
     const isCarouselTemplate = ['carousel_product', 'carousel_media'].includes(templateType);
@@ -385,13 +467,34 @@ export const createCampaign = async (req, res) => {
       };
     });
 
-    const baseUrl = process.env.APP_URL || (req ? `${req.protocol}://${req.get('host')}` : '');
-    const uploadedFileUrl = req.file || (req.files && req.files['file_url'] ? req.files['file_url'][0] : null);
+    const forwardedProtocol = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+    const forwardedHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
+    const requestBaseUrl = `${forwardedProtocol || req.protocol}://${forwardedHost || req.get('host')}`;
+    const baseUrl = requestBaseUrl || process.env.APP_URL || '';
     const carouselUploadedFiles = req.files && req.files['carousel_files'] ? req.files['carousel_files'] : [];
+    let carouselFileIndexes = [];
+    if (req.body.carousel_file_indexes) {
+      try {
+        carouselFileIndexes = typeof req.body.carousel_file_indexes === 'string'
+          ? JSON.parse(req.body.carousel_file_indexes)
+          : req.body.carousel_file_indexes;
+      } catch {
+        return res.status(400).json({ error: 'Invalid carousel file index mapping.' });
+      }
+    }
+
+    if (!Array.isArray(carouselFileIndexes)) {
+      return res.status(400).json({ error: 'Carousel file index mapping must be an array.' });
+    }
+    if (carouselFileIndexes.length > 0 && carouselFileIndexes.length !== carouselUploadedFiles.length) {
+      return res.status(400).json({ error: 'Some carousel media files were not uploaded. Please select the card media again.' });
+    }
 
     let finalMediaUrl = media_url;
     if (uploadedFileUrl) {
-      finalMediaUrl = uploadedFileUrl.path.startsWith('http') || uploadedFileUrl.path.startsWith('/') ? uploadedFileUrl.path : `/${uploadedFileUrl.path}`;
+      finalMediaUrl = uploadedFileUrl.path.startsWith('http')
+        ? uploadedFileUrl.path
+        : `/uploads/campaigns/${uploadedFileUrl.filename}`;
       if (!finalMediaUrl.startsWith('http')) {
         finalMediaUrl = `${baseUrl}${finalMediaUrl}`;
       }
@@ -400,23 +503,62 @@ export const createCampaign = async (req, res) => {
     let resolvedCarouselCardsData = carouselCardsData;
     if (carouselUploadedFiles.length > 0) {
       const parsed = Array.isArray(resolvedCarouselCardsData) ? resolvedCarouselCardsData : (typeof resolvedCarouselCardsData === 'string' ? JSON.parse(resolvedCarouselCardsData) : []);
+      const fileByCardIndex = new Map();
+      carouselUploadedFiles.forEach((file, fileIndex) => {
+        const cardIndex = carouselFileIndexes.length > 0 ? Number(carouselFileIndexes[fileIndex]) : fileIndex;
+        if (!Number.isInteger(cardIndex) || cardIndex < 0 || cardIndex >= parsed.length || fileByCardIndex.has(cardIndex)) {
+          return;
+        }
+        fileByCardIndex.set(cardIndex, file);
+      });
+
+      if (fileByCardIndex.size !== carouselUploadedFiles.length) {
+        return res.status(400).json({ error: 'Carousel media files could not be matched to their cards.' });
+      }
+
       resolvedCarouselCardsData = await Promise.all(parsed.map(async (card, index) => {
-        const file = carouselUploadedFiles[index];
+        const file = fileByCardIndex.get(index);
         if (file) {
-          let fullLink = file.path.startsWith('http') || file.path.startsWith('/') ? file.path : `/${file.path}`;
+          let fullLink = file.path.startsWith('http')
+            ? file.path
+            : `/uploads/campaigns/${file.filename}`;
           if (!fullLink.startsWith('http')) {
             fullLink = `${baseUrl}${fullLink}`;
           }
           return {
             ...card,
             header: {
-              type: file.mimetype.startsWith('video/') ? 'video' : 'image',
+              type: getWhatsAppTypeFromMime(file.mimetype),
               link: fullLink
             }
           };
         }
         return card;
       }));
+    }
+
+    if (templateType === 'carousel_media') {
+      for (let index = 0; index < (resolvedCarouselCardsData || []).length; index += 1) {
+        const card = resolvedCarouselCardsData[index];
+        const link = String(card?.header?.link || '');
+        const hasMediaId = Boolean(card?.header?.id);
+        if (!hasMediaId && (!/^https?:\/\//i.test(link) || /^blob:/i.test(link))) {
+          return res.status(400).json({
+            error: `Carousel card ${index + 1} requires an uploaded file or a public HTTP(S) media URL.`
+          });
+        }
+
+        const templateHeader = template.carousel_cards?.[index]?.components?.find(
+          (component) => String(component.type || '').toLowerCase() === 'header'
+        );
+        const expectedType = String(templateHeader?.format || '').toLowerCase();
+        const actualType = String(card?.header?.type || '').toLowerCase();
+        if (expectedType && actualType && expectedType !== actualType) {
+          return res.status(400).json({
+            error: `Carousel card ${index + 1} requires ${expectedType} media, but ${actualType} was selected.`
+          });
+        }
+      }
     }
 
     const campaign = await Campaign.create({
