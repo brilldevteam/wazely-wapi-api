@@ -200,7 +200,7 @@ export const createForm = async (req, res) => {
             name,
             description,
             slug: finalSlug,
-            category: category ?? "CUSTOM",
+            category: category ?? "OTHER",
             meta_status: "DRAFT",
             is_active: is_active ?? true,
             submit_settings,
@@ -234,8 +234,6 @@ export const createForm = async (req, res) => {
 
 const getMetaType = (fieldType) => {
     switch (fieldType) {
-        case 'number':
-            return { type: 'number', __example__: 0 };
         case 'checkbox':
         case 'multiselect':
             return { type: 'array', items: { type: 'string' }, __example__: [] };
@@ -265,8 +263,13 @@ export const buildMetaFlowPayload = (form) => {
     const sortedSteps = Object.keys(stepMap).map(Number).sort((a, b) => a - b);
     const successScreenId = "SUCCESS_SCREEN";
 
+    const isRenderable = (f) => {
+        if (!f || f.type === 'heading') return false;
+        return mapFieldToMetaComponent(f) !== null;
+    };
+
     const allFieldNames = (form.fields || [])
-        .filter(f => f.type !== 'heading')
+        .filter(isRenderable)
         .map(f => f.name || generateName(f.label));
 
     const screens = sortedSteps.map((step, index) => {
@@ -281,14 +284,14 @@ export const buildMetaFlowPayload = (form) => {
         for (let i = 0; i < index; i++) {
             const s = sortedSteps[i];
             (stepMap[s] || []).forEach(f => {
-                if (f.type !== 'heading') {
+                if (isRenderable(f)) {
                     incomingFields.push(f.name || generateName(f.label));
                 }
             });
         }
 
         const currentStepFields = (stepMap[step] || [])
-            .filter(f => f.type !== 'heading')
+            .filter(isRenderable)
             .map(f => f.name || generateName(f.label));
 
         const payload = {
@@ -437,8 +440,9 @@ const mapFieldToMetaComponent = (field) => {
             return {
                 ...base,
                 type: 'TextInput',
-                'input-type': 'number',
-                ...(field.helper_text && { 'helper-text': field.helper_text })
+                'input-type': 'text',
+                'pattern': '^[0-9]+$',
+                'helper-text': field.helper_text || 'Please enter a valid number',
             };
         case 'email':
             return {
@@ -473,8 +477,10 @@ const mapFieldToMetaComponent = (field) => {
             };
 
         case 'select': {
-            const ds = mapDataSource(field.options);
-            if (!ds.length) return null;
+            let ds = mapDataSource(field.options);
+            if (!ds.length) {
+                ds = [{ id: 'default', title: field.label || 'Select Option' }];
+            }
 
             return {
                 ...base,
@@ -484,8 +490,10 @@ const mapFieldToMetaComponent = (field) => {
         }
 
         case 'radio': {
-            const ds = mapDataSource(field.options);
-            if (!ds.length) return null;
+            let ds = mapDataSource(field.options);
+            if (!ds.length) {
+                ds = [{ id: 'default', title: field.label || 'Select Option' }];
+            }
 
             return {
                 ...base,
@@ -496,8 +504,13 @@ const mapFieldToMetaComponent = (field) => {
 
         case 'checkbox':
         case 'multiselect': {
-            const ds = mapDataSource(field.options);
-            if (!ds.length) return null;
+            let ds = mapDataSource(field.options);
+            if (!ds.length) {
+                ds = [{
+                    id: "true",
+                    title: field.label || "Check if applicable"
+                }];
+            }
 
             return {
                 ...base,
@@ -1191,8 +1204,7 @@ export const deleteForm = async (req, res) => {
             }
         }
 
-        form.deleted_at = new Date();
-        await form.save();
+        await Form.deleteOne({ _id: id, user_id: userId });
 
         return res.status(200).json({
             success: true,

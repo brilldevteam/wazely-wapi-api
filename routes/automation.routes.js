@@ -16,10 +16,12 @@ router.post('/', checkPlanLimit('bot_flow'), checkPermission('create.automation_
 router.put('/:flowId', checkPermission('update.automation_flows'), automationController.updateAutomationFlow);
 router.delete('/:flowId', checkPermission('delete.automation_flows'), automationController.deleteAutomationFlow);
 router.patch('/:flowId/toggle', checkPermission('update.automation_flows'), automationController.toggleAutomationFlow);
+router.patch('/:flowId/toggle-pause', checkPermission('update.automation_flows'), automationController.togglePauseAutomationFlow);
 router.post('/:flowId/test', checkPermission('update.automation_flows'), automationController.testAutomationFlow);
 router.get('/:flowId/executions', checkPermission('view.automation_flows'), automationController.getAutomationExecutions);
 router.get('/executions/:executionId', checkPermission('view.automation_flows'), automationController.getAutomationExecution);
 router.get('/statistics', checkPermission('view.automation_flows'), automationController.getAutomationStatistics);
 router.get('/node-types', checkPermission('view.automation_flows'), automationController.getAvailableNodeTypes);
+router.post('/suggest', checkPermission('create.automation_flows'), automationController.suggestAutomationFlow);
 
 export default router;

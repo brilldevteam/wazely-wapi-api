@@ -23,6 +23,16 @@ const contactSchema = new mongoose.Schema({
     type: String,
     index: true
   },
+  whatsapp_username: {
+    type: String,
+    index: true,
+    sparse: true
+  },
+  whatsapp_bsuid: {
+    type: String,
+    index: true,
+    sparse: true
+  },
   name: {
     type: String,
     required: true,
@@ -37,6 +47,23 @@ const contactSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     default: null
+  },
+  assigned_chatbot: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Chatbot',
+    default: null
+  },
+  chatbot_paused: {
+  chatbot_overrides: {
+    type: Object,
+    default: null
+  },
+    type: Boolean,
+    default: false
+  },
+  ai_message_count: {
+    type: Number,
+    default: 0
   },
   tags: [{
     type: mongoose.Schema.Types.ObjectId,
@@ -79,6 +106,11 @@ const contactSchema = new mongoose.Schema({
     ref: 'User',
     required: true
   },
+  workspace_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Workspace',
+    default: null
+  },
   created_by: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
@@ -93,6 +125,22 @@ const contactSchema = new mongoose.Schema({
   last_incoming_message_at: {
     type: Date,
     default: null
+  },
+  snooze_count: {
+    type: Number,
+    default: 0
+  },
+  is_snoozed: {
+    type: Boolean,
+    default: false
+  },
+  snooze_time_minutes: {
+    type: Number,
+    default: 10
+  },
+  snooze_count_limit: {
+    type: Number,
+    default: 3
   },
   last_outgoing_message_at: {
     type: Date,
@@ -149,12 +197,8 @@ const contactSchema = new mongoose.Schema({
   collection: 'contacts'
 });
 
-contactSchema.index({ phone_number: 1, user_id: 1 });
-contactSchema.index({ telegram_chat_id: 1, user_id: 1 });
-contactSchema.index({ facebook_page_scoped_id: 1, user_id: 1 });
-contactSchema.index({ instagram_scoped_id: 1, user_id: 1 });
-contactSchema.index({ twitter_user_id: 1, user_id: 1 });
 contactSchema.index({ user_id: 1 });
+contactSchema.index({ workspace_id: 1 });
 contactSchema.index({ created_by: 1 });
 contactSchema.index({ assigned_to: 1 });
 contactSchema.index({ tags: 1 });

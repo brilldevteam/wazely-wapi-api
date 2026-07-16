@@ -142,6 +142,10 @@ const CampaignSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  original_filename: {
+    type: String,
+    default: null
+  },
 
   coupon_code: {
     type: String,
@@ -182,9 +186,48 @@ const CampaignSchema = new mongoose.Schema({
     default: null
   },
 
+  is_published: {
+    type: Boolean,
+    default: false
+  },
+  is_resend: {
+    type: Boolean,
+    default: false
+  },
+  original_campaign_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Campaign',
+    default: null
+  },
   is_scheduled: {
     type: Boolean,
     default: false
+  },
+  is_recurring: {
+    type: Boolean,
+    default: false
+  },
+  recurring_pattern: {
+    type: String,
+    enum: ['daily', 'weekly', 'monthly', 'custom_cron'],
+    default: 'monthly'
+  },
+  cron_expression: {
+    type: String,
+    default: null
+  },
+  recurring_end_date: {
+    type: Date,
+    default: null
+  },
+  parent_recurring_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Campaign',
+    default: null
+  },
+  next_run_at: {
+    type: Date,
+    default: null
   },
   avoid_unsubscribers: {
     type: Boolean,
@@ -192,6 +235,14 @@ const CampaignSchema = new mongoose.Schema({
   },
   scheduled_at: {
     type: Date,
+    default: null
+  },
+  batch_size: {
+    type: Number,
+    default: null
+  },
+  pause_between_batches: {
+    type: Number,
     default: null
   },
   sent_at: {
@@ -209,8 +260,12 @@ const CampaignSchema = new mongoose.Schema({
 
   status: {
     type: String,
-    enum: ['draft', 'scheduled', 'sending', 'completed', 'failed', 'cancelled', 'completed_with_errors'],
+    enum: ['draft', 'scheduled', 'recurring', 'sending', 'completed', 'failed', 'cancelled', 'completed_with_errors'],
     default: 'draft'
+  },
+  is_paused: {
+    type: Boolean,
+    default: false
   },
 
   stats: {
@@ -256,29 +311,29 @@ CampaignSchema.index({ status: 1 });
 CampaignSchema.index({ scheduled_at: 1 });
 CampaignSchema.index({ deleted_at: 1 });
 
-CampaignSchema.virtual('is_active').get(function() {
+CampaignSchema.virtual('is_active').get(function () {
   return this.deleted_at === null;
 });
 
-CampaignSchema.methods.softDelete = function() {
+CampaignSchema.methods.softDelete = function () {
   this.deleted_at = new Date();
   return this.save();
 };
 
-CampaignSchema.methods.restore = function() {
+CampaignSchema.methods.restore = function () {
   this.deleted_at = null;
   return this.save();
 };
 
-CampaignSchema.query.active = function() {
+CampaignSchema.query.active = function () {
   return this.where({ deleted_at: null });
 };
 
-CampaignSchema.query.forUser = function(userId) {
+CampaignSchema.query.forUser = function (userId) {
   return this.where({ user_id: userId, deleted_at: null });
 };
 
-CampaignSchema.query.scheduledToSend = function() {
+CampaignSchema.query.scheduledToSend = function () {
   return this.where({
     is_scheduled: true,
     status: 'scheduled',
@@ -287,13 +342,14 @@ CampaignSchema.query.scheduledToSend = function() {
   });
 };
 
-CampaignSchema.statics.forUser = function(userId) {
+CampaignSchema.statics.forUser = function (userId) {
   return this.find({ user_id: userId, deleted_at: null });
 };
 
-CampaignSchema.statics.getScheduledCampaigns = function() {
+CampaignSchema.statics.getScheduledCampaigns = function () {
   return this.find({
     is_scheduled: true,
+    is_recurring: { $ne: true },
     status: 'scheduled',
     scheduled_at: { $lte: new Date() },
     deleted_at: null

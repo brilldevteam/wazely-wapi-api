@@ -54,8 +54,7 @@ const paymentTransactionSchema = new mongoose.Schema({
   metadata: { type: mongoose.Schema.Types.Mixed },   
 
   whatsapp_phone_number_id: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'WhatsappPhoneNumber'
+    type: String
   }
 
 }, {

@@ -340,9 +340,10 @@ export const register = async (req, res) => {
     const isSmtpConfigured = checkIsSmtpConfigured(settings);
     const otpChannel = settings?.otp_delivery_method || 'email';
     const isDemoMode = settings?.is_demo_mode || false;
-
+    console.log("otpChannel" ,otpChannel);
     let shouldUseDemoOTP = false;
     if (isDemoMode || !isSmtpConfigured) {
+      
       shouldUseDemoOTP = true;
     } else if (otpChannel === 'whatsapp') {
       const isWabaConfigured = await checkIsWabaConfigured();
@@ -353,11 +354,13 @@ export const register = async (req, res) => {
           isTemplateAssigned = true;
         }
       }
-      
+    console.log("isWabaConfigured" ,isWabaConfigured , isTemplateAssigned);
+
       if (!isWabaConfigured || !isTemplateAssigned) {
         shouldUseDemoOTP = true;
       }
     }
+
 
     if (shouldUseDemoOTP) {
       const demoOTP = '123456';
@@ -418,7 +421,7 @@ export const register = async (req, res) => {
       pendingUser.is_verified = true;
       pendingUser.email_verified = true;
       pendingUser.phone_verified = true;
-      
+
       await finalizeUserCreation(pendingUser, false);
 
       return res.status(201).json({
@@ -1037,7 +1040,7 @@ export const updateProfile = async (req, res) => {
           try {
             contact.name = user.name;
             contact.email = user.email;
-            
+
             if (contact.phone_number !== user.phone) {
               const duplicate = await Contact.findOne({
                 phone_number: user.phone,

@@ -229,7 +229,6 @@ export const requirePlatformFeature = (featureSuffix) => {
 
     const isEnabledInToggles = req.plan?.enabled_features?.[feature] === true || req.plan?.enabled_features?.[feature] === "true";
     const isEnabledInBooleans = req.plan?.features?.[feature] === true || req.plan?.features?.[feature] === "true";
-    console.log("isEnabledInBooleans", isEnabledInBooleans, "feature:", feature, "plan features:", req.plan?.features);
 
     if (!isEnabledInToggles && !isEnabledInBooleans) {
       return res.status(403).json({

@@ -36,7 +36,8 @@ export const createTemplate = async (req, res) => {
       has_expiration,
       template_type = "standard",
       carousel_cards,
-      platform = "whatsapp"
+      platform = "whatsapp",
+      save_as_draft = false
     } = req.body;
 
     if (typeof buttons === "string") {
@@ -128,10 +129,29 @@ export const createTemplate = async (req, res) => {
     const normalizedCategory = (category || "UTILITY").toUpperCase();
     const isAuthenticationCategory = normalizedCategory === "AUTHENTICATION";
     const normalizedTemplateType = (template_type || "standard").toLowerCase();
-    const isCarouselTemplate =
-      ["carousel_product", "carousel_media"].includes(normalizedTemplateType) &&
-      rawCarouselCards.length >= 2 &&
-      rawCarouselCards.length <= 10;
+    const isCarouselTemplateType = ["carousel_product", "carousel_media"].includes(normalizedTemplateType);
+    if (isCarouselTemplateType) {
+      if (!Array.isArray(rawCarouselCards) || rawCarouselCards.length < 2 || rawCarouselCards.length > 10) {
+        return res.status(400).json({
+          error: "Carousel template must contain between 2 and 10 cards.",
+          message: "Carousel template must contain between 2 and 10 cards."
+        });
+      }
+
+      for (let i = 0; i < rawCarouselCards.length; i++) {
+        const card = rawCarouselCards[i];
+        const buttonsComp = card.components?.find((c) => (c.type || "").toLowerCase() === "buttons");
+        const hasButtons = buttonsComp && Array.isArray(buttonsComp.buttons) && buttonsComp.buttons.length > 0;
+        if (!hasButtons) {
+          return res.status(400).json({
+            error: `Card ${i + 1} must contain at least one button. Each card in a WhatsApp carousel template must have at least one button.`,
+            message: `Card ${i + 1} must contain at least one button. Each card in a WhatsApp carousel template must have at least one button.`
+          });
+        }
+      }
+    }
+
+    const isCarouselTemplate = isCarouselTemplateType;
 
     const uploadedFile = req.file || (req.files && req.files.file && req.files.file[0]);
     let header = null;
@@ -165,7 +185,7 @@ export const createTemplate = async (req, res) => {
           }
 
           const mediaType = getWhatsAppTypeFromMime(uploadedFile.mimetype);
-          const localUrl = await saveBufferLocally(buffer, uploadedFile.mimetype, mediaType, userId);
+          const localUrl = await saveBufferLocally(buffer, uploadedFile.mimetype, mediaType, userId, uploadedFile.originalname);
 
           console.log("handle", handle, "localUrl", localUrl);
           header = {
@@ -173,6 +193,7 @@ export const createTemplate = async (req, res) => {
             media_type: mediaType,
             media_url: localUrl,
             handle: handle,
+            original_filename: uploadedFile.originalname,
           };
         }
       }
@@ -332,7 +353,9 @@ export const createTemplate = async (req, res) => {
       templateComponents.push(footerComponent);
     }
 
-    const detectedTemplateType = detectTemplateType(templateComponents, isCarouselTemplate, isAuthenticationCategory);
+    const detectedTemplateType = detectTemplateType(templateComponents, isCarouselTemplate, isAuthenticationCategory, call_permission, is_limited_time_offer);
+
+    const isDraft = save_as_draft === true || save_as_draft === 'true';
 
     const createdTemplate = await Template.create({
       user_id: req.user.owner_id,
@@ -353,12 +376,12 @@ export const createTemplate = async (req, res) => {
       template_type: detectedTemplateType,
       carousel_cards: isCarouselTemplate ? rawCarouselCards : undefined,
       authentication_options: authentication_options || undefined,
-      status: (platform === "whatsapp" && waba?.provider !== "baileys") ? "draft" : "approved",
+      status: isDraft ? "draft" : ((platform === "whatsapp" && waba?.provider !== "baileys") ? "draft" : "approved"),
       platform: platform,
     });
     console.log("createdTemplate", createdTemplate);
 
-    if (platform === "whatsapp" && waba && waba.provider !== "baileys") {
+    if (platform === "whatsapp" && waba && waba.provider !== "baileys" && !isDraft) {
       try {
         const metaPayload = buildMetaTemplatePayload(createdTemplate);
 
@@ -399,11 +422,19 @@ export const createTemplate = async (req, res) => {
     }
 
     return res.status(201).json({
-      message: (platform === "whatsapp" && waba?.provider !== "baileys") ? "Template submitted" : "Template created successfully",
+      message: (platform === "whatsapp" && waba?.provider !== "baileys" && !isDraft) ? "Template submitted" : (isDraft ? "Template saved as draft" : "Template created successfully"),
       template_id: createdTemplate._id,
     });
   } catch (error) {
-    console.error("Error creating template:", error);
+    if (error.response) {
+      console.error("Error creating template (Axios Error):", {
+        status: error.response.status,
+        statusText: error.response.statusText,
+        data: error.response.data,
+      });
+    } else {
+      console.error("Error creating template:", error.message || error);
+    }
     const errData = error.response?.data?.error;
     const errorMsg = errData?.error_user_title || errData?.error_user_msg || errData?.message || error.message;
     return res.status(400).json({
@@ -659,56 +690,67 @@ export const buildMetaTemplatePayload = (template) => {
   }
 
   if (template.buttons?.length) {
-    const ctaButtons = [];
-    const quickReplyButtons = [];
+    const formattedButtons = [];
+    let phoneCallCount = 0;
+    let urlCount = 0;
+    let copyCodeCount = 0;
 
     template.buttons.forEach((btn) => {
       const type = (btn.type || "").toLowerCase();
       if (type === "phone_call") {
+        phoneCallCount++;
         let phoneNumber = btn.phone_number || "";
         if (phoneNumber && !phoneNumber.startsWith("+")) {
           phoneNumber = "+" + phoneNumber;
         }
-        ctaButtons.push({
+        formattedButtons.push({
           type: "PHONE_NUMBER",
           text: btn.text,
           phone_number: phoneNumber,
         });
       } else if (type === "website" || type === "url") {
-        ctaButtons.push({
+        urlCount++;
+        formattedButtons.push({
           type: "URL",
           text: btn.text,
           url: btn.url || btn.website_url,
         });
       } else if (type === "copy_code") {
-        ctaButtons.push({
+        copyCodeCount++;
+        formattedButtons.push({
           type: "COPY_CODE",
           example: btn.example || btn.text,
         });
       } else if (type === "quick_reply") {
-        quickReplyButtons.push({
+        formattedButtons.push({
           type: "QUICK_REPLY",
           text: btn.text,
         });
       } else if (type === "catalog") {
-        quickReplyButtons.push({
+        formattedButtons.push({
           type: "CATALOG",
           text: btn.text,
         });
       }
     });
 
-    if (ctaButtons.length && quickReplyButtons.length) {
-      throw new Error("Cannot mix Call-to-Action and Quick Reply buttons");
+    if (formattedButtons.length > 10) {
+      throw new Error("Maximum 10 buttons allowed in total");
+    }
+    if (phoneCallCount > 1) {
+      throw new Error("Maximum 1 Phone Call button allowed");
+    }
+    if (urlCount > 2) {
+      throw new Error("Maximum 2 URL buttons allowed");
+    }
+    if (copyCodeCount > 1) {
+      throw new Error("Maximum 1 Copy Code button allowed");
     }
 
-    if (ctaButtons.length > 2) throw new Error("Maximum 2 CTA buttons allowed");
-    if (quickReplyButtons.length > 10) throw new Error("Maximum 10 Quick Reply buttons allowed");
-
-    if (ctaButtons.length || quickReplyButtons.length) {
+    if (formattedButtons.length) {
       components.push({
         type: "BUTTONS",
-        buttons: ctaButtons.length ? ctaButtons : quickReplyButtons,
+        buttons: formattedButtons,
       });
     }
   }
@@ -726,42 +768,49 @@ export const buildMetaTemplatePayload = (template) => {
 function buildCarouselMetaTemplatePayload(template) {
   const bodyVariables = template.body_variables || [];
   const bodyComponent = {
-    type: "body",
+    type: "BODY",
     text: template.message_body,
   };
   if (bodyVariables.length > 0) {
-    const examples = bodyVariables.map((v) => v.example);
-    bodyComponent.example = examples.length === 1
-      ? { body_text: examples[0] }
-      : { body_text: [examples] };
+    const examples = bodyVariables.map((v) => String(v.example || "example"));
+    bodyComponent.example = {
+      body_text: [examples]
+    };
   }
 
   const cards = (template.carousel_cards || []).map((card) => {
-    const components = (card.components || []).map((comp) => {
-      const c = { type: (comp.type || "").toLowerCase() };
-      if (comp.format) c.format = comp.format.toLowerCase();
-      if (comp.text) c.text = comp.text;
-      if (comp.example && typeof comp.example === "object") {
-        c.example = comp.example;
-      }
-      if (comp.buttons && comp.buttons.length) {
-        c.buttons = comp.buttons.map((btn) => {
-          const b = {
-            type: (btn.type || "spm").toLowerCase().replace("quick_reply", "quick_reply").replace("url", "url"),
-            text: btn.text || "View",
-          };
-          if (btn.url) b.url = btn.url;
-          return b;
-        });
-      }
-      return c;
-    });
+    const components = (card.components || [])
+      .map((comp) => {
+        const typeUpper = (comp.type || "").toUpperCase();
+        if (typeUpper === "BUTTONS" && (!comp.buttons || comp.buttons.length === 0)) {
+          return null; // Skip empty buttons components
+        }
+
+        const c = { type: typeUpper };
+        if (comp.format) c.format = comp.format.toUpperCase();
+        if (comp.text) c.text = comp.text;
+        if (comp.example && typeof comp.example === "object") {
+          c.example = comp.example;
+        }
+        if (comp.buttons && comp.buttons.length) {
+          c.buttons = comp.buttons.map((btn) => {
+            const b = {
+              type: (btn.type || "").toUpperCase(),
+              text: btn.text || "View",
+            };
+            if (btn.url) b.url = btn.url;
+            return b;
+          });
+        }
+        return c;
+      })
+      .filter(Boolean);
     return { components };
   });
 
   const components = [bodyComponent];
   if (cards.length) {
-    components.push({ type: "carousel", cards });
+    components.push({ type: "CAROUSEL", cards });
   }
 
   return {
@@ -1229,18 +1278,34 @@ const findComponent = (components, type) => {
 };
 
 const fetchTemplatesFromMeta = async (wabaId, accessToken) => {
-  const url = `https://graph.facebook.com/${API_VERSION}/${wabaId}/message_templates`;
+  let url = `https://graph.facebook.com/${API_VERSION}/${wabaId}/message_templates`;
+  let allTemplates = [];
+  let currentParams = {
+    fields: "id,name,status,category,language,components,rejected_reason,quality_score",
+    limit: 100
+  };
 
-  const response = await axios.get(url, {
-    params: {
-      fields: "id,name,status,category,language,components,rejected_reason,quality_score",
-    },
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
+  while (url) {
+    const response = await axios.get(url, {
+      params: currentParams,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
 
-  return response.data.data || [];
+    if (response.data && response.data.data) {
+      allTemplates = allTemplates.concat(response.data.data);
+    }
+
+    if (response.data && response.data.paging && response.data.paging.next) {
+      url = response.data.paging.next;
+      currentParams = {}; 
+    } else {
+      url = null;
+    }
+  }
+
+  return allTemplates;
 };
 
 const reconstructAuthBody = (components) => {
@@ -1440,7 +1505,7 @@ const extractCarouselCards = (components) => {
 };
 
 
-const detectTemplateType = (components, isCarousel, isAuth) => {
+const detectTemplateType = (components, isCarousel, isAuth, call_permission, is_limited_time_offer) => {
   if (isCarousel) {
     const cards = extractCarouselCards(components);
     const hasProductHeader = cards.some((card) =>
@@ -1458,12 +1523,12 @@ const detectTemplateType = (components, isCarousel, isAuth) => {
   }
 
   const ltoComponent = components.find((c) => (c.type || "").toUpperCase() === "LIMITED_TIME_OFFER");
-  if (ltoComponent) {
+  if (is_limited_time_offer || ltoComponent) {
     return "limited_time_offer";
   }
 
   const callPermissionComponent = components.find((c) => (c.type || "").toUpperCase() === "CALL_PERMISSION_REQUEST");
-  if (callPermissionComponent) {
+  if (call_permission || callPermissionComponent) {
     return "call_permission";
   }
 
@@ -1473,21 +1538,9 @@ const detectTemplateType = (components, isCarousel, isAuth) => {
     c.buttons.some((btn) => (btn.type || "").toUpperCase() === "CATALOG")
   );
 
-  const hasProductMessage = components.some((c) =>
-    (c.type || "").toUpperCase() === "BODY" &&
-    c.text &&
-    (c.text.toLowerCase().includes("product") || c.text.toLowerCase().includes("catalog"))
-  );
-
-  if (hasCatalogButton || hasProductMessage) {
+  if (hasCatalogButton) {
     return "catalog";
   }
-
-  const hasCouponCode = components.some((c) =>
-    (c.type || "").toUpperCase() === "BODY" &&
-    c.text &&
-    (c.text.toLowerCase().includes("coupon") || c.text.toLowerCase().includes("code") || c.text.toLowerCase().includes("discount"))
-  );
 
   const hasCopyCodeButton = components.some((c) =>
     (c.type || "").toUpperCase() === "BUTTONS" &&
@@ -1495,7 +1548,7 @@ const detectTemplateType = (components, isCarousel, isAuth) => {
     c.buttons.some((btn) => (btn.type || "").toUpperCase() === "COPY_CODE")
   );
 
-  if (hasCouponCode || hasCopyCodeButton) {
+  if (hasCopyCodeButton) {
     return "coupon";
   }
 
@@ -1685,13 +1738,14 @@ export const updateTemplate = async (req, res) => {
         }
 
         const mediaType = getWhatsAppTypeFromMime(uploadedFile.mimetype);
-        const localUrl = await saveBufferLocally(buffer, uploadedFile.mimetype, mediaType, userId);
+        const localUrl = await saveBufferLocally(buffer, uploadedFile.mimetype, mediaType, userId, uploadedFile.originalname);
 
         updateData.header = {
           format: "media",
           media_type: mediaType,
           media_url: localUrl,
           handle: handle || undefined,
+          original_filename: uploadedFile.originalname,
         };
       }
     }
@@ -1838,7 +1892,50 @@ export const updateTemplate = async (req, res) => {
       } else if (header_text === null) {
         updateData.header = null;
       }
+    }    // Re-detect template type on update
+    const isCurrentlyCarousel = ["carousel_product", "carousel_media"].includes(normalizedTemplateType);
+    const isCurrentlyAuth = (category || template.category || "").toUpperCase() === "AUTHENTICATION";
+
+    if (req.body.call_permission !== undefined) updateData.call_permission = req.body.call_permission;
+    if (req.body.is_limited_time_offer !== undefined) updateData.is_limited_time_offer = req.body.is_limited_time_offer;
+    if (req.body.offer_text !== undefined) updateData.offer_text = req.body.offer_text;
+    if (req.body.has_expiration !== undefined) updateData.has_expiration = req.body.has_expiration;
+
+    const testCallPermission = updateData.call_permission !== undefined ? updateData.call_permission : template.call_permission;
+    const testIsLimitedTimeOffer = updateData.is_limited_time_offer !== undefined ? updateData.is_limited_time_offer : template.is_limited_time_offer;
+
+    const testComponents = [];
+    const testBody = message_body !== undefined ? message_body : template.message_body;
+    if (testBody && !isCurrentlyAuth) {
+      testComponents.push({
+        type: "BODY",
+        text: testBody
+      });
     }
+    const testButtons = buttons !== undefined ? updateData.buttons : template.buttons;
+    if (testButtons && testButtons.length > 0) {
+      const buttonComponents = testButtons.map(btn => {
+        const btnType = (btn.type || "").toUpperCase();
+        const component = { type: btnType, text: btn.text };
+        if (btnType === "PHONE_CALL") {
+          component.phone_number = btn.phone_number;
+        } else if (btnType === "URL" || btnType === "WEBSITE") {
+          component.url = btn.url || btn.website_url;
+        } else if (btnType === "COPY_CODE") {
+          component.copy_button_text = btn.text;
+          if (btn.example) component.example = btn.example;
+        }
+        return component;
+      });
+
+      testComponents.push({
+        type: "BUTTONS",
+        buttons: buttonComponents
+      });
+    }
+
+    const detectedTemplateType = detectTemplateType(testComponents, isCurrentlyCarousel, isCurrentlyAuth, testCallPermission, testIsLimitedTimeOffer);
+    updateData.template_type = detectedTemplateType;
 
     const previousTemplateSnapshot = template.toObject({ depopulate: true });
     const updatedLocalTemplate = await Template.findByIdAndUpdate(
@@ -1847,9 +1944,12 @@ export const updateTemplate = async (req, res) => {
       { returnDocument: 'after', runValidators: true }
     );
 
-    const shouldUpdateOnMeta = req.body.should_update_on_meta ?? true === true;
+    let shouldUpdateOnMeta = true;
+    if (req.body.should_update_on_meta !== undefined) {
+      shouldUpdateOnMeta = req.body.should_update_on_meta === true || req.body.should_update_on_meta === 'true';
+    }
 
-    if (shouldUpdateOnMeta && template.platform === "whatsapp" && waba) {
+    if (shouldUpdateOnMeta && template.platform === "whatsapp" && waba && waba.provider !== "baileys") {
       let metaUpdateApplied = false;
       try {
         const wabaId = waba.whatsapp_business_account_id;
@@ -1960,7 +2060,15 @@ export const updateTemplate = async (req, res) => {
       data: updatedLocalTemplate,
     });
   } catch (error) {
-    console.error("Error updating template:", error);
+    if (error.response) {
+      console.error("Error updating template (Axios Error):", {
+        status: error.response.status,
+        statusText: error.response.statusText,
+        data: error.response.data,
+      });
+    } else {
+      console.error("Error updating template:", error.message || error);
+    }
     return res.status(400).json({
       error: error.response?.data || error.message,
     });
@@ -2052,7 +2160,15 @@ export const deleteTemplate = async (req, res) => {
     });
 
   } catch (error) {
-    console.error("Error deleting template:", error);
+    if (error.response) {
+      console.error("Error deleting template (Axios Error):", {
+        status: error.response.status,
+        statusText: error.response.statusText,
+        data: error.response.data,
+      });
+    } else {
+      console.error("Error deleting template:", error.message || error);
+    }
     const errData = error.response?.data?.error;
     const errorMsg = errData?.error_user_title || errData?.error_user_msg || errData?.message || error.message;
     return res.status(500).json({
@@ -2384,6 +2500,83 @@ export const migrateTemplate = async (req, res) => {
   }
 };
 
+export const publishTemplate = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.owner_id;
+
+    const template = await Template.findOne({
+      _id: id,
+      user_id: userId,
+      is_admin_template: { $ne: true },
+      deleted_at: null,
+    });
+
+    if (!template) {
+      return res.status(404).json({ message: "Template not found" });
+    }
+
+    if (template.status !== "draft") {
+      return res.status(400).json({ message: "Template is already published or pending" });
+    }
+
+    if (template.platform === "whatsapp") {
+      let waba = await WhatsappWaba.findOne({
+        _id: template.waba_id,
+        user_id: userId,
+        deleted_at: null,
+      });
+
+      if (!waba) {
+        return res.status(404).json({ message: "WhatsApp WABA not found" });
+      }
+
+      if (waba.provider !== "baileys") {
+        try {
+          const wabaId = waba.whatsapp_business_account_id;
+          const accessToken = waba.access_token;
+          const metaPayload = buildMetaTemplatePayload(template);
+
+          const createResponse = await submitTemplateToMeta(metaPayload, wabaId, accessToken);
+
+          await Template.findByIdAndUpdate(id, {
+            meta_template_id: createResponse.id || createResponse.name,
+            status: createResponse.status?.toLowerCase() || "pending",
+          });
+
+          return res.status(200).json({
+            success: true,
+            message: "Template published to WhatsApp successfully",
+          });
+        } catch (error) {
+          console.error("Error publishing Meta template:", error.response?.data || error.message);
+          const metaErrMsg = error.response?.data?.error?.error_user_msg || error.response?.data?.error?.message || error.message || "Unknown Meta API error";
+          return res.status(400).json({
+            success: false,
+            message: metaErrMsg,
+            error: metaErrMsg,
+          });
+        }
+      }
+    }
+
+    await Template.findByIdAndUpdate(id, {
+      status: "approved",
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Template published successfully",
+    });
+  } catch (error) {
+    console.error("Error publishing template:", error.message || error);
+    return res.status(500).json({
+      message: "Failed to publish template: " + error.message,
+      details: error.message,
+    });
+  }
+};
+
 export default {
   createTemplate,
   getAllTemplates,
@@ -2396,4 +2589,5 @@ export default {
   deleteTemplate,
   migrateTemplate,
   getAdminTemplatesForUsers,
+  publishTemplate,
 };

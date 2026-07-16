@@ -199,7 +199,12 @@ const LATEST_LANDING_DATA = {
     description: "Simple, transparent pricing with no hidden fees. Start free and scale as you grow.",
     subscribed_count: "5000",
     subscribed_user: "avatar",
-    plans: []
+    plans: [],
+    tabs: [
+      { key: "monthly", value: "Monthly", badge: "" },
+      { key: "yearly", value: "Yearly", badge: "SAVE" },
+      { key: "lifetime", value: "One Time", badge: "" }
+    ]
   },
 
   testimonials_section: {
@@ -242,32 +247,7 @@ const seedLandingPage = async () => {
     const existingLandingPage = await LandingPage.findOne();
 
     if (existingLandingPage) {
-      await LandingPage.updateOne(
-        { _id: existingLandingPage._id },
-        {
-          $set: {
-            header_section: LATEST_LANDING_DATA.header_section,
-            hero_section: LATEST_LANDING_DATA.hero_section,
-            features_section: LATEST_LANDING_DATA.features_section,
-            platform_section: LATEST_LANDING_DATA.platform_section,
-            pricing_section: {
-              ...LATEST_LANDING_DATA.pricing_section,
-              plans: existingLandingPage.pricing_section?.plans || []
-            },
-            testimonials_section: {
-              ...LATEST_LANDING_DATA.testimonials_section,
-              testimonials: existingLandingPage.testimonials_section?.testimonials || []
-            },
-            faq_section: {
-              ...LATEST_LANDING_DATA.faq_section,
-              faqs: existingLandingPage.faq_section?.faqs || []
-            },
-            contact_section: LATEST_LANDING_DATA.contact_section,
-            footer_section: LATEST_LANDING_DATA.footer_section,
-          }
-        }
-      );
-      console.log('Landing page seeded successfully!');
+      console.log('Landing page already exists, skipping seed.');
       return;
     }
 

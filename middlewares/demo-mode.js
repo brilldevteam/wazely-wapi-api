@@ -27,12 +27,10 @@ const ALLOWED_PATHS = [
   '/api/webhook/stripe',
   '/api/webhook/razorpay',
   '/api/webhook/paypal',
-  '/api/auth/register',
   '/api/auth/login',
   '/api/auth/logout',
   '/api/auth/resend-signup-otp',
   '/api/auth/verify-signup-otp',
-  '/api/settings'
 ];
 
 function isAllowedPath(path) {

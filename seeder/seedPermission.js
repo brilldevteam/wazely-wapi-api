@@ -758,14 +758,24 @@ const seedPermission = async () => {
                 });
 
                 if (rolePermissionIds.length > 0) {
-                    await RolePermission.deleteMany({ role_id: role._id });
+                    const existingRolePerms = await RolePermission.find({ role_id: role._id }).lean();
+                    const existingPermIds = new Set(existingRolePerms.map(rp => rp.permission_id.toString()));
+                    
+                    const newRolePermissionsData = [];
+                    const uniqueNewPermIds = [...new Set(rolePermissionIds.map(id => id.toString()))];
+                    
+                    for (const id of uniqueNewPermIds) {
+                         if (!existingPermIds.has(id)) {
+                             newRolePermissionsData.push({ role_id: role._id, permission_id: id });
+                         }
+                    }
 
-                    const rolePermissionsData = [...new Set(rolePermissionIds.map(id => id.toString()))]
-                        .map(id => ({ role_id: role._id, permission_id: id }));
-
-                    await RolePermission.insertMany(rolePermissionsData);
-
-                    console.log(`Assigned ${rolePermissionsData.length} permissions to role: ${roleName}`);
+                    if (newRolePermissionsData.length > 0) {
+                        await RolePermission.insertMany(newRolePermissionsData);
+                        console.log(`Assigned ${newRolePermissionsData.length} NEW permissions to role: ${roleName}`);
+                    } else {
+                        console.log(`Role ${roleName} already has all default permissions.`);
+                    }
                 }
             }
         }

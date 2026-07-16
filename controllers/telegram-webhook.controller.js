@@ -65,6 +65,8 @@ export const handleTelegramWebhook = async (req, res) => {
         }
 
         contact.last_incoming_message_at = new Date();
+        contact.snooze_count = 0;
+        contact.is_snoozed = false;
         if (contact.deleted_at) {
             contact.deleted_at = null;
         }
@@ -119,6 +121,7 @@ export const handleTelegramWebhook = async (req, res) => {
                         const formattedMessage = {
                             id: outboundMessage._id.toString(),
                             content: outboundMessage.content,
+                            interactiveData: outboundMessage.interactive_data || null,
                             messageType: outboundMessage.message_type,
                             fileUrl: null,
                             createdAt: outboundMessage.wa_timestamp,
@@ -215,6 +218,7 @@ export const handleTelegramWebhook = async (req, res) => {
                 reaction_message_id: newMessage.reaction_message_id || undefined,
                 reaction_emoji: newMessage.reaction_emoji || undefined,
                 content: newMessage.content,
+                interactiveData: newMessage.interactive_data || null,
                 messageType: newMessage.message_type,
                 fileUrl: newMessage.file_url || null,
                 createdAt: newMessage.wa_timestamp,
@@ -308,25 +312,53 @@ export const handleTelegramWebhook = async (req, res) => {
                 assigned_by: bot.user_id
             }).lean();
 
+            let assignedChatbotId = null;
+
             if (chatAssignment && chatAssignment.chatbot_id) {
                 const isExpired = chatAssignment.chatbot_expires_at && new Date() > new Date(chatAssignment.chatbot_expires_at);
                 if (!isExpired) {
-                    console.log(`[Telegram Webhook] Forwarding message to assigned chatbot ${chatAssignment.chatbot_id}`);
-                    await sendAutomatedReply({
-                        wabaId: null,
-                        contactId: contact._id,
-                        replyType: 'chatbot',
-                        replyId: chatAssignment.chatbot_id,
-                        senderNumber: chatId,
-                        incomingText: content,
-                        userId: bot.user_id,
-                        whatsappPhoneNumberId: null
-                    });
-                    automatedHandled = true;
+                    assignedChatbotId = chatAssignment.chatbot_id;
                 } else {
                     console.log(`[Telegram Webhook] Chatbot assignment expired for ${chatId}`);
                     await db.ChatAssignment.findByIdAndUpdate(chatAssignment._id, { chatbot_id: null, chatbot_expires_at: null });
                 }
+            } else if (contact.assigned_chatbot && !contact.chatbot_paused) {
+                assignedChatbotId = contact.assigned_chatbot;
+            }
+
+            if (assignedChatbotId) {
+                let finalContent = content;
+
+                if (messageType === 'audio' && fileUrl) {
+                    const { default: Chatbot } = await import('../models/chatbot.model.js');
+                    const chatbot = await Chatbot.findById(assignedChatbotId).populate('ai_model').lean();
+                    if (chatbot && chatbot.voice_settings && chatbot.voice_settings.enabled) {
+                        const { transcribeAudio } = await import('../utils/voice-ai.service.js');
+                        console.log(`[Telegram Webhook] Transcribing incoming audio message...`);
+                        try {
+                            const transcript = await transcribeAudio(fileUrl, chatbot.api_key, chatbot.ai_model);
+                            if (transcript) {
+                                finalContent = transcript;
+                                console.log('[Telegram Webhook] Transcription successful:', transcript);
+                            }
+                        } catch (err) {
+                            console.error('[Telegram Webhook] Transcription failed:', err.message);
+                        }
+                    }
+                }
+
+                console.log(`[Telegram Webhook] Forwarding message to assigned chatbot ${assignedChatbotId}`);
+                await sendAutomatedReply({
+                    wabaId: null,
+                    contactId: contact._id,
+                    replyType: 'chatbot',
+                    replyId: assignedChatbotId,
+                    senderNumber: chatId,
+                    incomingText: finalContent,
+                    userId: bot.user_id,
+                    whatsappPhoneNumberId: null
+                });
+                automatedHandled = true;
             }
 
             if (!automatedHandled) {

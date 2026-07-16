@@ -59,10 +59,26 @@ class MetaFlowService {
                 .map(field => {
                     console.log(`[MetaFlowService] Mapping field: ${field.name}, Available in data: ${Object.prototype.hasOwnProperty.call(data, field.name)}`);
                     if (Object.prototype.hasOwnProperty.call(data, field.name)) {
+                        let finalValue = data[field.name];
+
+                        if (field.options && field.options.length > 0) {
+                            if (Array.isArray(finalValue)) {
+                                finalValue = finalValue.map(val => {
+                                    const matchedOption = field.options.find(opt => opt.id === val || opt.value === val || opt.id === String(val));
+                                    return matchedOption ? (matchedOption.label || matchedOption.title || matchedOption.value || val) : val;
+                                });
+                            } else {
+                                const matchedOption = field.options.find(opt => opt.id === finalValue || opt.value === finalValue || opt.id === String(finalValue));
+                                if (matchedOption) {
+                                    finalValue = matchedOption.label || matchedOption.title || matchedOption.value || finalValue;
+                                }
+                            }
+                        }
+
                         return {
                             field_id: field.id,
                             label: field.label || field.name,
-                            value: data[field.name]
+                            value: finalValue
                         };
                     }
                     return null;

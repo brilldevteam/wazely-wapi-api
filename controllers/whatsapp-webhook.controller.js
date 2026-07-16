@@ -22,21 +22,14 @@ const processedMids = new Set();
 setInterval(() => processedMids.clear(), 60000);
 
 const formatWhatsAppStatusError = (errors = []) => {
-  if (!Array.isArray(errors) || errors.length === 0) {
-    return null;
-  }
-
+  if (!Array.isArray(errors) || errors.length === 0) return null;
   return errors
-    .map((error) => {
-      const parts = [
-        error.code ? `Code ${error.code}` : null,
-        error.title,
-        error.message,
-        error.error_data?.details
-      ].filter(Boolean);
-
-      return parts.join(': ');
-    })
+    .map((error) => [
+      error.code ? `Code ${error.code}` : null,
+      error.title,
+      error.message,
+      error.error_data?.details,
+    ].filter(Boolean).join(': '))
     .filter(Boolean)
     .join(' | ');
 };
@@ -124,7 +117,7 @@ export const handleFacebookInstagramIncoming = async (req, res, io = null) => {
               });
             }
           } else if (change.field === 'feed' && change.value && change.value.item === 'comment' && change.value.verb === 'add') {
-             const normalizedComment = {
+            const normalizedComment = {
               id: change.value.comment_id,
               text: change.value.message,
               from: change.value.from || { id: 'unknown', name: 'Unknown User' },
@@ -182,9 +175,18 @@ export const handleFacebookInstagramIncoming = async (req, res, io = null) => {
           const matchedPage = connection.pages?.find(p => p.instagram_account_id === pageOrAccountId || p.page_id === pageOrAccountId);
           pageAccessToken = matchedPage?.page_access_token || connection.pages?.[0]?.page_access_token || connection.access_token;
         } else {
+          connection = await FacebookConnection.findOne({ 'pages.page_id': pageOrAccountId, is_active: true });
+          if (connection) {
+            platform = 'facebook';
+            workspaceId = connection.workspace_id;
+            userId = connection.user_id;
+            connectionId = connection._id;
+            const matchedPage = connection.pages?.find(p => p.page_id === pageOrAccountId);
+            pageAccessToken = matchedPage?.page_access_token || connection.long_lived_access_token;
+          } else {
             const activeIgConns = await InstagramConnection.find({ is_active: true });
             for (const conn of activeIgConns) {
-              if (conn.access_token && conn.access_token.startsWith('IGAA')) {
+              if (conn.access_token && conn.access_token.startsWith('IGA')) {
                 try {
                   const res = await axios.get(`https://graph.instagram.com/v22.0/${pageOrAccountId}?fields=id`, {
                     params: { access_token: conn.access_token }
@@ -209,6 +211,7 @@ export const handleFacebookInstagramIncoming = async (req, res, io = null) => {
                 }
               }
             }
+          }
         }
       }
 
@@ -230,12 +233,20 @@ export const handleFacebookInstagramIncoming = async (req, res, io = null) => {
 
       for (const event of messagingEvents) {
         const mid = event.message?.mid || event.postback?.mid || event.reaction?.mid || event.read?.mid;
-        if (mid && processedMids.has(mid)) {
-            console.log(`[Facebook/Instagram Webhook] Skipping duplicate webhook for mid: ${mid}`);
-            continue;
+        const isReaction = !!event.reaction;
+        const isPostback = !!event.postback;
+
+        // Use a unique deduplication key for reactions to avoid conflicts with the reacted message ID
+        let dedupeKey = mid;
+        if (isReaction && event.reaction) {
+          const emoji = event.reaction.emoji || event.reaction.reaction || 'reaction';
+          const action = event.reaction.action || 'react';
+          dedupeKey = `reaction_${mid}_${emoji}_${action}`;
         }
-        if (mid && !event.read) {
-            processedMids.add(mid);
+
+        if (dedupeKey && processedMids.has(dedupeKey)) {
+          console.log(`[Facebook/Instagram Webhook] Skipping duplicate webhook for key: ${dedupeKey}`);
+          continue;
         }
 
         const senderId = event.sender?.id;
@@ -246,132 +257,135 @@ export const handleFacebookInstagramIncoming = async (req, res, io = null) => {
           continue;
         }
 
-        const isReaction = !!event.reaction;
-        const isPostback = !!event.postback;
+        if (dedupeKey && !event.read) {
+          processedMids.add(dedupeKey);
+        }
 
         const payload = event.postback?.payload || event.message?.quick_reply?.payload || '';
 
         if (payload.startsWith('FOLLOW_GATE_YES___')) {
-            const automationId = payload.replace('FOLLOW_GATE_YES___', '');
-            try {
-                const automation = await SocialAutomation.findById(automationId).lean();
-                if (automation) {
-                    let isUserFollowing = true;
+          const automationId = payload.replace('FOLLOW_GATE_YES___', '');
+          try {
+            const automation = await SocialAutomation.findById(automationId).lean();
+            if (automation) {
+              let isUserFollowing = true;
 
-                    if (body.object === 'instagram' && pageAccessToken && pageAccessToken.startsWith('IGAA')) {
-                        try {
-                            const checkFollowUrl = `https://graph.instagram.com/v22.0/${senderId}?fields=is_user_follow_business&access_token=${pageAccessToken}`;
-                            const checkRes = await axios.get(checkFollowUrl);
-                            isUserFollowing = checkRes.data.is_user_follow_business;
-                        } catch (apiErr) {
-                            console.warn('[Facebook/Instagram Webhook] Could not verify IG follow status:', apiErr.message);
-                        }
-                    }
-
-                    if (!isUserFollowing) {
-                        const msgText = "We just checked, and it looks like you aren't following us yet! Please follow our page to receive the details.";
-                        const sendResponse = await omnichannelService.sendMessage({
-                            platform: 'instagram',
-                            workspace_id: workspaceId,
-                            user_id: userId,
-                            page_id: pageOrAccountId,
-                            recipient_id: senderId,
-                            message_type: 'interactive',
-                            text: msgText,
-                            buttons: [
-                                { type: 'postback', title: automation.follow_gate_button_yes || "I Follow", payload: `FOLLOW_GATE_YES___${automation._id}` },
-                                { type: 'postback', title: automation.follow_gate_button_no || "Not Now", payload: `FOLLOW_GATE_NO___${automation._id}` }
-                            ]
-                        });
-                        try {
-                            const contact = await Contact.findOne({
-                                user_id: userId,
-                                $or: [ { facebook_page_scoped_id: senderId }, { instagram_scoped_id: senderId } ]
-                            });
-                            if (contact) {
-                                await Message.create({
-                                    workspace_id: workspaceId,
-                                    user_id: userId,
-                                    contact_id: contact._id,
-                                    platform: 'instagram',
-                                    provider: 'instagram',
-                                    sender_id: pageOrAccountId,
-                                    recipient_id: senderId,
-                                    sender_number: pageOrAccountId,
-                                    recipient_number: senderId,
-                                    direction: 'outbound',
-                                    message_type: 'interactive',
-                                    content: msgText,
-                                    interactive_data: { interactiveType: 'button', buttons: [
-                                        { type: 'postback', title: automation.follow_gate_button_yes || "I Follow", payload: `FOLLOW_GATE_YES___${automation._id}` },
-                                        { type: 'postback', title: automation.follow_gate_button_no || "Not Now", payload: `FOLLOW_GATE_NO___${automation._id}` }
-                                    ]},
-                                    from_me: true,
-                                    delivery_status: 'delivered',
-                                    read_status: 'unread',
-                                    wa_timestamp: new Date(),
-                                    platform_message_id: sendResponse?.message_id
-                                });
-                            }
-                        } catch (dbErr) {}
-                    } else {
-                        const connectionData = { workspaceId, userId, pageAccessToken, pageOrAccountId, isFollowGateBypass: true };
-                        await socialAutomationService.sendAutomationReplyMaterial(automation, senderId, null, connectionData);
-                    }
+              if (body.object === 'instagram' && pageAccessToken && pageAccessToken.startsWith('IGA')) {
+                try {
+                  const checkFollowUrl = `https://graph.instagram.com/v22.0/${senderId}?fields=is_user_follow_business&access_token=${pageAccessToken}`;
+                  const checkRes = await axios.get(checkFollowUrl);
+                  isUserFollowing = checkRes.data.is_user_follow_business;
+                } catch (apiErr) {
+                  console.warn('[Facebook/Instagram Webhook] Could not verify IG follow status:', apiErr.message);
                 }
-            } catch (err) {
-                console.error('[Facebook/Instagram Webhook] Error triggering FOLLOW_GATE_YES:', err);
+              }
+
+              if (!isUserFollowing) {
+                const msgText = automation.follow_gate_rejection_message || "We just checked, and it looks like you aren't following us yet! Please follow our page to receive the details.";
+                const sendResponse = await omnichannelService.sendMessage({
+                  platform: 'instagram',
+                  workspace_id: workspaceId,
+                  user_id: userId,
+                  page_id: pageOrAccountId,
+                  recipient_id: senderId,
+                  message_type: 'interactive',
+                  text: msgText,
+                  buttons: [
+                    { type: 'postback', title: automation.follow_gate_button_yes || "I Follow", payload: `FOLLOW_GATE_YES___${automation._id}` },
+                    { type: 'postback', title: automation.follow_gate_button_no || "Not Now", payload: `FOLLOW_GATE_NO___${automation._id}` }
+                  ]
+                });
+                try {
+                  const contact = await Contact.findOne({
+                    user_id: userId,
+                    $or: [{ facebook_page_scoped_id: senderId }, { instagram_scoped_id: senderId }]
+                  });
+                  if (contact) {
+                    await Message.create({
+                      workspace_id: workspaceId,
+                      user_id: userId,
+                      contact_id: contact._id,
+                      platform: 'instagram',
+                      provider: 'instagram',
+                      sender_id: pageOrAccountId,
+                      recipient_id: senderId,
+                      sender_number: pageOrAccountId,
+                      recipient_number: senderId,
+                      direction: 'outbound',
+                      message_type: 'interactive',
+                      content: msgText,
+                      interactive_data: {
+                        interactiveType: 'button', buttons: [
+                          { type: 'postback', title: automation.follow_gate_button_yes || "I Follow", payload: `FOLLOW_GATE_YES___${automation._id}` },
+                          { type: 'postback', title: automation.follow_gate_button_no || "Not Now", payload: `FOLLOW_GATE_NO___${automation._id}` }
+                        ]
+                      },
+                      from_me: true,
+                      delivery_status: 'delivered',
+                      read_status: 'unread',
+                      wa_timestamp: new Date(),
+                      platform_message_id: sendResponse?.message_id
+                    });
+                  }
+                } catch (dbErr) { }
+              } else {
+                const connectionData = { workspaceId, userId, pageAccessToken, pageOrAccountId, isFollowGateBypass: true };
+                await socialAutomationService.sendAutomationReplyMaterial(automation, senderId, null, connectionData);
+              }
             }
+          } catch (err) {
+            console.error('[Facebook/Instagram Webhook] Error triggering FOLLOW_GATE_YES:', err);
+          }
         }
 
         if (payload.startsWith('FOLLOW_GATE_NO___')) {
-            const automationId = payload.replace('FOLLOW_GATE_NO___', '');
-            try {
-                const automation = await SocialAutomation.findById(automationId).lean();
-                if (automation) {
-                    const rejectionMessage = automation.follow_gate_rejection_message || "No worries! Whenever you're ready, just follow our page to get the exclusive details.";
-                    const localEventPlatform = body.object === 'instagram' ? 'instagram' : 'facebook';
-                    const sendResponse = await omnichannelService.sendMessage({
-                        platform: localEventPlatform,
-                        workspace_id: workspaceId,
-                        user_id: userId,
-                        page_id: pageOrAccountId,
-                        recipient_id: senderId,
-                        message_type: 'text',
-                        text: rejectionMessage,
-                        reply_to_comment_id: null
-                    });
-                    try {
-                        const contact = await Contact.findOne({
-                            user_id: userId,
-                            $or: [ { facebook_page_scoped_id: senderId }, { instagram_scoped_id: senderId } ]
-                        });
-                        if (contact) {
-                            await Message.create({
-                                workspace_id: workspaceId,
-                                user_id: userId,
-                                contact_id: contact._id,
-                                platform: localEventPlatform,
-                                provider: localEventPlatform,
-                                sender_id: pageOrAccountId,
-                                recipient_id: senderId,
-                                sender_number: pageOrAccountId,
-                                recipient_number: senderId,
-                                direction: 'outbound',
-                                message_type: 'text',
-                                content: rejectionMessage,
-                                from_me: true,
-                                delivery_status: 'delivered',
-                                read_status: 'unread',
-                                wa_timestamp: new Date(),
-                                platform_message_id: sendResponse?.message_id
-                            });
-                        }
-                    } catch (dbErr) {}
+          const automationId = payload.replace('FOLLOW_GATE_NO___', '');
+          try {
+            const automation = await SocialAutomation.findById(automationId).lean();
+            if (automation) {
+              const rejectionMessage = automation.follow_gate_rejection_message || "No worries! Whenever you're ready, just follow our page to get the exclusive details.";
+              const localEventPlatform = body.object === 'instagram' ? 'instagram' : 'facebook';
+              const sendResponse = await omnichannelService.sendMessage({
+                platform: localEventPlatform,
+                workspace_id: workspaceId,
+                user_id: userId,
+                page_id: pageOrAccountId,
+                recipient_id: senderId,
+                message_type: 'text',
+                text: rejectionMessage,
+                reply_to_comment_id: null
+              });
+              try {
+                const contact = await Contact.findOne({
+                  user_id: userId,
+                  $or: [{ facebook_page_scoped_id: senderId }, { instagram_scoped_id: senderId }]
+                });
+                if (contact) {
+                  await Message.create({
+                    workspace_id: workspaceId,
+                    user_id: userId,
+                    contact_id: contact._id,
+                    platform: localEventPlatform,
+                    provider: localEventPlatform,
+                    sender_id: pageOrAccountId,
+                    recipient_id: senderId,
+                    sender_number: pageOrAccountId,
+                    recipient_number: senderId,
+                    direction: 'outbound',
+                    message_type: 'text',
+                    content: rejectionMessage,
+                    from_me: true,
+                    delivery_status: 'delivered',
+                    read_status: 'unread',
+                    wa_timestamp: new Date(),
+                    platform_message_id: sendResponse?.message_id
+                  });
                 }
-            } catch (err) {
-                console.error('[Facebook/Instagram Webhook] Error triggering FOLLOW_GATE_NO:', err);
+              } catch (dbErr) { }
             }
+          } catch (err) {
+            console.error('[Facebook/Instagram Webhook] Error triggering FOLLOW_GATE_NO:', err);
+          }
         }
 
         if (payload.startsWith('phone_call|')) {
@@ -445,7 +459,7 @@ export const handleFacebookInstagramIncoming = async (req, res, io = null) => {
                   senderName = profileRes.data.name || `${profileRes.data.first_name || ''} ${profileRes.data.last_name || ''}`.trim() || 'Facebook User';
                 }
               } else {
-                const baseUrl = pageAccessToken.startsWith('IGAA') ? 'https://graph.instagram.com' : 'https://graph.facebook.com';
+                const baseUrl = pageAccessToken.startsWith('IGA') ? 'https://graph.instagram.com' : 'https://graph.facebook.com';
                 const profileUrl = `${baseUrl}/v22.0/${senderId}?fields=username,name&access_token=${pageAccessToken}`;
                 const profileRes = await axios.get(profileUrl);
                 senderName = profileRes.data.name || profileRes.data.username || 'Instagram User';
@@ -494,7 +508,7 @@ export const handleFacebookInstagramIncoming = async (req, res, io = null) => {
                   updatedName = profileRes.data.name || `${profileRes.data.first_name || ''} ${profileRes.data.last_name || ''}`.trim() || null;
                 }
               } else {
-                const baseUrl = pageAccessToken.startsWith('IGAA') ? 'https://graph.instagram.com' : 'https://graph.facebook.com';
+                const baseUrl = pageAccessToken.startsWith('IGA') ? 'https://graph.instagram.com' : 'https://graph.facebook.com';
                 const profileUrl = `${baseUrl}/v22.0/${senderId}?fields=username,name&access_token=${pageAccessToken}`;
                 const profileRes = await axios.get(profileUrl);
                 updatedName = profileRes.data.name || profileRes.data.username || null;
@@ -510,6 +524,8 @@ export const handleFacebookInstagramIncoming = async (req, res, io = null) => {
         }
 
         contactDoc.last_incoming_message_at = new Date();
+        contactDoc.snooze_count = 0;
+        contactDoc.is_snoozed = false;
         if (contactDoc.deleted_at) {
           contactDoc.deleted_at = null;
         }
@@ -547,25 +563,53 @@ export const handleFacebookInstagramIncoming = async (req, res, io = null) => {
           fileUrl = message.reply_to.story.url;
         }
 
-        const newMessage = await Message.create({
-          workspace_id: workspaceId,
-          user_id: userId,
-          contact_id: contactDoc._id,
-          platform: eventPlatform,
-          provider: eventPlatform,
-          platform_message_id: isReaction ? `reaction_${message.mid}_${Date.now()}` : message.mid,
-          reaction_message_id: isReaction ? message.mid : undefined,
-          sender_id: senderId,
-          recipient_id: recipientId,
-          direction: 'inbound',
-          message_type: messageType,
-          content: isReaction ? undefined : content,
-          reaction_emoji: isReaction ? content : undefined,
-          file_url: fileUrl,
-          delivery_status: 'delivered',
-          read_status: 'unread',
-          wa_timestamp: new Date(event.timestamp || Date.now())
-        });
+        let newMessage;
+        const isUnreact = isReaction && event.reaction?.action === 'unreact';
+
+        if (isReaction) {
+          // Always clear existing reactions from this sender on the target message first
+          await Message.deleteMany({
+            reaction_message_id: message.mid,
+            sender_id: senderId,
+            message_type: 'reaction'
+          });
+        }
+
+        if (isUnreact) {
+          const mongoose = (await import('mongoose')).default;
+          newMessage = {
+            _id: new mongoose.Types.ObjectId(),
+            platform_message_id: `reaction_unreact_${message.mid}_${Date.now()}`,
+            reaction_message_id: message.mid,
+            reaction_emoji: '',
+            content: '',
+            message_type: 'reaction',
+            wa_timestamp: new Date(event.timestamp || Date.now()),
+            user_id: userId,
+            direction: 'inbound',
+            delivery_status: 'delivered'
+          };
+        } else {
+          newMessage = await Message.create({
+            workspace_id: workspaceId,
+            user_id: userId,
+            contact_id: contactDoc._id,
+            platform: eventPlatform,
+            provider: eventPlatform,
+            platform_message_id: isReaction ? `reaction_${message.mid}_${Date.now()}` : message.mid,
+            reaction_message_id: isReaction ? message.mid : undefined,
+            sender_id: senderId,
+            recipient_id: recipientId,
+            direction: 'inbound',
+            message_type: messageType,
+            content: isReaction ? undefined : content,
+            reaction_emoji: isReaction ? content : undefined,
+            file_url: fileUrl,
+            delivery_status: 'delivered',
+            read_status: 'unread',
+            wa_timestamp: new Date(event.timestamp || Date.now())
+          });
+        }
 
         if (activeIo) {
           let wabaIdForSocket = recipientId;
@@ -606,6 +650,7 @@ export const handleFacebookInstagramIncoming = async (req, res, io = null) => {
             reaction_message_id: newMessage.reaction_message_id || undefined,
             reaction_emoji: newMessage.reaction_emoji || undefined,
             content: newMessage.content,
+            interactiveData: newMessage.interactive_data || null,
             messageType: newMessage.message_type,
             fileUrl: newMessage.file_url || null,
             createdAt: newMessage.wa_timestamp,
@@ -718,25 +763,55 @@ export const handleFacebookInstagramIncoming = async (req, res, io = null) => {
               assigned_by: userId
             }).lean();
 
+            let assignedChatbotId = null;
+
             if (chatAssignment && chatAssignment.chatbot_id) {
               const isExpired = chatAssignment.chatbot_expires_at && new Date() > new Date(chatAssignment.chatbot_expires_at);
               if (!isExpired) {
-                console.log(`[Facebook/Instagram Webhook] Forwarding message to assigned chatbot ${chatAssignment.chatbot_id}`);
-                await sendAutomatedReply({
-                  wabaId: null,
-                  contactId: contactDoc._id,
-                  replyType: 'chatbot',
-                  replyId: chatAssignment.chatbot_id,
-                  senderNumber: senderId,
-                  incomingText: content,
-                  userId: userId,
-                  whatsappPhoneNumberId: null
-                });
-                automatedHandled = true;
+                assignedChatbotId = chatAssignment.chatbot_id;
               } else {
                 console.log(`[Facebook/Instagram Webhook] Chatbot assignment expired for ${senderId}`);
                 await db.ChatAssignment.findByIdAndUpdate(chatAssignment._id, { chatbot_id: null, chatbot_expires_at: null });
               }
+            } else if (contactDoc.assigned_chatbot && !contactDoc.chatbot_paused) {
+                assignedChatbotId = contactDoc.assigned_chatbot;
+            }
+
+            if (assignedChatbotId) {
+                let finalContent = content;
+
+                if (messageType === 'audio' && fileUrl) {
+                    const { default: Chatbot } = await import('../models/chatbot.model.js');
+                    const chatbot = await Chatbot.findById(assignedChatbotId).populate('ai_model').lean();
+                    if (chatbot && chatbot.voice_settings && chatbot.voice_settings.enabled) {
+                        const { transcribeAudio } = await import('../utils/voice-ai.service.js');
+                        console.log(`[Facebook/Instagram Webhook] Transcribing incoming audio message...`);
+                        try {
+                            const transcript = await transcribeAudio(fileUrl, chatbot.api_key, chatbot.ai_model);
+                            if (transcript) {
+                                finalContent = transcript;
+                                console.log('[Facebook/Instagram Webhook] Transcription successful:', transcript);
+                            }
+                        } catch (err) {
+                            console.error('[Facebook/Instagram Webhook] Transcription failed:', err.message);
+                        }
+                    }
+                }
+
+                if (finalContent) {
+                    console.log(`[Facebook/Instagram Webhook] Forwarding message to assigned chatbot ${assignedChatbotId}`);
+                    await sendAutomatedReply({
+                      wabaId: null,
+                      contactId: contactDoc._id,
+                      replyType: 'chatbot',
+                      replyId: assignedChatbotId,
+                      senderNumber: senderId,
+                      incomingText: finalContent,
+                      userId: userId,
+                      whatsappPhoneNumberId: null
+                    });
+                    automatedHandled = true;
+                }
             }
           }
           if (!automatedHandled) {
@@ -849,24 +924,67 @@ export const handleIncomingMessage = async (req, res, io = null) => {
 
     const contact = await import('../models/index.js');
     const Contact = contact.Contact;
-    let contactDoc = await Contact.findOneAndUpdate(
-      { phone_number: message.from, created_by: whatsappPhoneNumber.user_id },
-      {
-        $setOnInsert: {
-          phone_number: message.from,
-          name: message.from,
-          source: 'whatsapp',
-          user_id: whatsappPhoneNumber.user_id,
-          created_by: whatsappPhoneNumber.user_id,
-          status: 'lead'
-        },
-        $set: { deleted_at: null }
-      },
-      { new: true, upsert: true }
-    );
+    const senderContact = value?.contacts?.find(c => c.wa_id === message.from) || value?.contacts?.[0];
+    console.log("senderContact?.profile" , senderContact?.profile);
+    const waName = senderContact?.profile?.name || message.from;
+    const waUsername = senderContact?.profile?.username || senderContact?.username || null;
+    const waBsuid = senderContact?.user_id || null;
 
+    let contactDoc = await Contact.findOne({
+      created_by: whatsappPhoneNumber.user_id,
+      $or: [
+        { phone_number: message.from },
+        { whatsapp_username: message.from },
+        ...(waBsuid ? [{ whatsapp_bsuid: waBsuid }] : [])
+      ]
+    });
 
-    contactDoc = await Contact.findById(contactDoc._id);
+    if (!contactDoc) {
+      const isPhone = /^\d+$/.test(message.from);
+      const contactFields = {
+        name: waName,
+        source: 'whatsapp',
+        user_id: whatsappPhoneNumber.user_id,
+        created_by: whatsappPhoneNumber.user_id,
+        status: 'lead',
+        deleted_at: null
+      };
+      if (isPhone) {
+        contactFields.phone_number = message.from;
+      }
+      if (waUsername) {
+        contactFields.whatsapp_username = waUsername;
+      } else if (!isPhone) {
+        contactFields.whatsapp_username = message.from;
+      }
+      if (waBsuid) {
+        contactFields.whatsapp_bsuid = waBsuid;
+      }
+
+      contactDoc = await Contact.create(contactFields);
+    } else {
+      let needsSave = false;
+      if (waUsername && contactDoc.whatsapp_username !== waUsername) {
+        contactDoc.whatsapp_username = waUsername;
+        needsSave = true;
+      }
+      if (waBsuid && contactDoc.whatsapp_bsuid !== waBsuid) {
+        contactDoc.whatsapp_bsuid = waBsuid;
+        needsSave = true;
+      }
+      if (contactDoc.deleted_at !== null) {
+        contactDoc.deleted_at = null;
+        needsSave = true;
+      }
+      if (needsSave) {
+        await contactDoc.save();
+      }
+    }
+
+    if (contactDoc.name === contactDoc.phone_number && waName !== message.from) {
+      contactDoc.name = waName;
+      await contactDoc.save();
+    }
 
     let automatedHandled = false;
 
@@ -1246,6 +1364,8 @@ export const handleIncomingMessage = async (req, res, io = null) => {
       }
     }
 
+    let formData = null;
+
     if (message.type === 'interactive' && message.interactive?.type === 'nfm_reply') {
       try {
         const { default: appointmentWebhookService } = await import('../services/whatsapp/appointment-webhook.service.js');
@@ -1256,6 +1376,7 @@ export const handleIncomingMessage = async (req, res, io = null) => {
           const submission = await metaFlowService.handleFlowSubmission(message, whatsappPhoneNumber, contactDoc);
           if (submission?._id) {
             messageDoc.submission_id = submission._id;
+            formData = submission.data; 
             await messageDoc.save();
             console.log(`[Webhook] Linked submission ${submission._id} to message ${messageDoc._id}`);
           }
@@ -1443,6 +1564,8 @@ export const handleIncomingMessage = async (req, res, io = null) => {
         platform: 'whatsapp',
         message: automationMessage,
         interactive_id: interactiveId,
+        textContent: content,
+        form_data: formData,
         senderNumber: message.from,
         recipientNumber: whatsappPhoneNumber.display_phone_number,
         messageType: message.type,
@@ -1465,10 +1588,14 @@ export const handleIncomingMessage = async (req, res, io = null) => {
       const config = await WabaConfiguration.findOne({ waba_id: wabaId });
 
       contactDoc.last_incoming_message_at = new Date();
+      contactDoc.snooze_count = 0;
+      contactDoc.is_snoozed = false;
       if (!contactDoc.user_id) {
         contactDoc.user_id = whatsappPhoneNumber.user_id;
       }
       await contactDoc.save();
+
+      let assignedChatbotId = null;
 
       const chatAssignment = await db.ChatAssignment.findOne({
         sender_number: message.from,
@@ -1480,29 +1607,51 @@ export const handleIncomingMessage = async (req, res, io = null) => {
       if (chatAssignment && chatAssignment.chatbot_id) {
         const isExpired = chatAssignment.chatbot_expires_at && new Date() > new Date(chatAssignment.chatbot_expires_at);
         if (!isExpired) {
-          console.log(`[Webhook] Forwarding message to assigned chatbot ${chatAssignment.chatbot_id}`);
-          await sendAutomatedReply({
-            wabaId,
-            contactId: contactDoc._id,
-            replyType: 'chatbot',
-            replyId: chatAssignment.chatbot_id,
-            senderNumber: message.from,
-            incomingText: content,
-            userId: whatsappPhoneNumber.user_id,
-            whatsappPhoneNumberId: whatsappPhoneNumber._id
-          });
-          automatedHandled = true;
+          assignedChatbotId = chatAssignment.chatbot_id;
         } else {
           console.log(`[Webhook] Chatbot assignment expired for ${message.from}`);
           await db.ChatAssignment.findByIdAndUpdate(chatAssignment._id, { chatbot_id: null, chatbot_expires_at: null });
         }
+      } else if (contactDoc.assigned_chatbot && !contactDoc.chatbot_paused) {
+          assignedChatbotId = contactDoc.assigned_chatbot;
+      }
+
+      let finalContent = content;
+
+      if (message.type === 'audio' && storedPath && assignedChatbotId) {
+          const { default: Chatbot } = await import('../models/chatbot.model.js');
+          const chatbot = await Chatbot.findById(assignedChatbotId).populate('ai_model').lean();
+          if (chatbot && chatbot.voice_settings && chatbot.voice_settings.enabled) {
+              const { transcribeAudio } = await import('../utils/voice-ai.service.js');
+              console.log(`[Webhook] Transcribing incoming WhatsApp audio message...`);
+              const transcript = await transcribeAudio(storedPath, chatbot.api_key, chatbot.ai_model);
+              if (transcript) {
+                  finalContent = transcript;
+                  console.log('[Webhook] Transcription successful:', transcript);
+              }
+          }
+      }
+
+      if (assignedChatbotId && finalContent) {
+          console.log(`[Webhook] Forwarding message to assigned chatbot ${assignedChatbotId}`);
+          await sendAutomatedReply({
+            wabaId,
+            contactId: contactDoc._id,
+            replyType: 'chatbot',
+            replyId: assignedChatbotId,
+            senderNumber: message.from,
+            incomingText: finalContent,
+            userId: whatsappPhoneNumber.user_id,
+            whatsappPhoneNumberId: whatsappPhoneNumber._id
+          });
+          automatedHandled = true;
       }
 
       if (!automatedHandled) {
         await processAutomatedPipeline({
           workspaceId: whatsappPhoneNumber.waba_id?.workspace_id,
           contactDoc,
-          incomingText: content,
+          incomingText: finalContent,
           channel: 'whatsapp',
           accountId: message.from,
           userId: whatsappPhoneNumber.user_id,
@@ -1612,11 +1761,14 @@ export const handleStatusUpdate = async (req, res, io = null) => {
     const waMessageId = status.id;
     const statusType = status.status;
     const timestamp = new Date(Number(status.timestamp) * 1000);
-    const failureReason = statusType === 'failed'
-      ? formatWhatsAppStatusError(status.errors) || 'WhatsApp reported message failed'
-      : null;
 
     console.log(`Processing status update for message ${waMessageId}: ${statusType}`);
+
+    let failureReason = null;
+    if (statusType === 'failed' && status.errors && status.errors.length > 0) {
+      console.log("Real error from Meta webhook status update:", JSON.stringify(status.errors, null, 2));
+      failureReason = formatWhatsAppStatusError(status.errors) || 'WhatsApp reported message failed';
+    }
 
     try {
       const updatedMessage = await updateWhatsAppStatus(waMessageId, statusType, timestamp, failureReason);
@@ -1635,6 +1787,7 @@ export const handleStatusUpdate = async (req, res, io = null) => {
 
         const formattedMessage = {
           id: populatedMessage._id.toString(),
+          wa_message_id: populatedMessage.wa_message_id || null,
           content: populatedMessage.content,
           interactiveData: populatedMessage.interactive_data,
           messageType: populatedMessage.message_type,
@@ -1660,7 +1813,8 @@ export const handleStatusUpdate = async (req, res, io = null) => {
           submission_id: populatedMessage.submission_id?._id || populatedMessage.submission_id || null,
           fields: populatedMessage.submission_id?.fields || [],
           user_id: populatedMessage.user_id?.toString(),
-          whatsapp_phone_number_id: populatedMessage.whatsapp_connection_id?.toString()
+          contact_id: populatedMessage.contact_id?.toString(),
+          whatsapp_phone_number_id: populatedMessage.whatsapp_phone_number_id?.toString() || populatedMessage.whatsapp_connection_id?.toString()
         };
 
         console.log("formattedMessage", formattedMessage);
@@ -1702,4 +1856,3 @@ export const handleStatusUpdate = async (req, res, io = null) => {
     res.sendStatus(200);
   }
 };
-

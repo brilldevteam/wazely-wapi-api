@@ -232,7 +232,7 @@ const transformToMetaSpec = async (data, pageId, imageHash, videoId, accessToken
         targetingSpec.geo_locations.location_types = locationsInput.location_types;
       }
       if (!countries.length && !cities.length && !regions.length) {
-         targetingSpec.geo_locations.countries = ['IN'];
+        targetingSpec.geo_locations.countries = ['IN'];
       }
     }
 
@@ -306,10 +306,10 @@ const transformToMetaSpec = async (data, pageId, imageHash, videoId, accessToken
   if (creative_type === 'CAROUSEL' && Array.isArray(carousel_cards)) {
     objectStorySpec.link_data = {
       message: primaryText,
-      link: 'https://fb.me/whatsdesk',
+      link: 'https://fb.me/Wapi',
       child_attachments: carousel_cards.map(card => {
         const attachment = {
-          link: card.link || 'https://fb.me/whatsdesk',
+          link: card.link || 'https://fb.me/Wapi',
           image_hash: card.image_hash,
           name: card.headline || headline || '',
           description: card.description || description || '',
@@ -334,7 +334,7 @@ const transformToMetaSpec = async (data, pageId, imageHash, videoId, accessToken
   } else {
     objectStorySpec.link_data = {
       message: primaryText,
-      link: 'https://fb.me/whatsdesk',
+      link: 'https://fb.me/Wapi',
       image_hash: imageHash,
       name: headline,
       description: description,
@@ -507,7 +507,7 @@ export const syncFacebookAdAccounts = async (req, res) => {
     }
 
     if (allAccounts.length === 0) {
-       return res.json({ success: true, message: 'No ad accounts found on Meta', count: 0 });
+      return res.json({ success: true, message: 'No ad accounts found on Meta', count: 0 });
     }
 
     const adAccountStatusMap = {
@@ -589,9 +589,9 @@ export const createFbAdCampaign = async (req, res) => {
 
     if (!fb_page_id) fb_page_id = connection.default_page_id;
 
-    if (!fb_page_id)    return res.status(400).json({ success: false, error: 'fb_page_id is required' });
+    if (!fb_page_id) return res.status(400).json({ success: false, error: 'fb_page_id is required' });
     if (!ad_account_id) return res.status(400).json({ success: false, error: 'ad_account_id is required' });
-    if (!name)          return res.status(400).json({ success: false, error: 'name is required' });
+    if (!name) return res.status(400).json({ success: false, error: 'name is required' });
 
     let finalAdAccountId = ad_account_id;
     if (mongoose.Types.ObjectId.isValid(ad_account_id)) {
@@ -718,10 +718,10 @@ export const createFbAdCampaign = async (req, res) => {
               if (creativeData.image_url) {
                 const downloadPath = await downloadRemoteMedia(creativeData.image_url, 'ads');
                 if (downloadPath) {
-                   const fullLocalPath = path.resolve(process.cwd(), downloadPath.replace(/^\//, ''));
-                   const imageBuffer = fs.readFileSync(fullLocalPath);
-                   adImageHash = await uploadAdImage(adAccountId, imageBuffer, 'image/jpeg', token);
-                   localMedia.image = downloadPath;
+                  const fullLocalPath = path.resolve(process.cwd(), downloadPath.replace(/^\//, ''));
+                  const imageBuffer = fs.readFileSync(fullLocalPath);
+                  adImageHash = await uploadAdImage(adAccountId, imageBuffer, 'image/jpeg', token);
+                  localMedia.image = downloadPath;
                 }
               }
             }
@@ -731,25 +731,25 @@ export const createFbAdCampaign = async (req, res) => {
               for (const card of creativeData.carousel_cards) {
                 let cardHash = card.image_hash;
                 if (!cardHash && card.image_url) {
-                   const downloadPath = await downloadRemoteMedia(card.image_url, 'ads');
-                   if (downloadPath) {
-                      const fullLocalPath = path.resolve(process.cwd(), downloadPath.replace(/^\//, ''));
-                      const imageBuffer = fs.readFileSync(fullLocalPath);
-                      cardHash = await uploadAdImage(adAccountId, imageBuffer, 'image/jpeg', token);
-                   }
+                  const downloadPath = await downloadRemoteMedia(card.image_url, 'ads');
+                  if (downloadPath) {
+                    const fullLocalPath = path.resolve(process.cwd(), downloadPath.replace(/^\//, ''));
+                    const imageBuffer = fs.readFileSync(fullLocalPath);
+                    cardHash = await uploadAdImage(adAccountId, imageBuffer, 'image/jpeg', token);
+                  }
                 }
                 resolvedCarouselCards.push({ ...card, image_hash: cardHash });
               }
             }
 
             if (!adImageHash && creativeData.image_url) {
-                const downloadPath = await downloadRemoteMedia(creativeData.image_url, 'ads');
-                if (downloadPath) {
-                    const fullLocalPath = path.resolve(process.cwd(), downloadPath.replace(/^\//, ''));
-                    const imageBuffer = fs.readFileSync(fullLocalPath);
-                    adImageHash = await uploadAdImage(adAccountId, imageBuffer, 'image/jpeg', token);
-                    localMedia.image = downloadPath;
-                }
+              const downloadPath = await downloadRemoteMedia(creativeData.image_url, 'ads');
+              if (downloadPath) {
+                const fullLocalPath = path.resolve(process.cwd(), downloadPath.replace(/^\//, ''));
+                const imageBuffer = fs.readFileSync(fullLocalPath);
+                adImageHash = await uploadAdImage(adAccountId, imageBuffer, 'image/jpeg', token);
+                localMedia.image = downloadPath;
+              }
             }
 
             const { objectStorySpec } = await transformToMetaSpec(
@@ -1013,11 +1013,11 @@ export const syncRemoteCampaigns = async (req, res) => {
 export const getFbAdCampaigns = async (req, res) => {
   try {
     const userId = getOwnerId(req.user);
-    const page    = Math.max(1, parseInt(req.query.page)  || 1);
-    const limit   = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
-    const skip    = (page - 1) * limit;
-    const search  = req.query.search || '';
-    const sortBy  = req.query.sortBy || 'created_at';
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
+    const skip = (page - 1) * limit;
+    const search = req.query.search || '';
+    const sortBy = req.query.sortBy || 'created_at';
     const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
 
     const filter = { user_id: userId, deleted_at: null };
@@ -1090,11 +1090,11 @@ export const getAdSetsByCampaign = async (req, res) => {
   try {
     const userId = getOwnerId(req.user);
     const campaignId = req.params.id;
-    const page    = Math.max(1, parseInt(req.query.page)  || 1);
-    const limit   = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
-    const skip    = (page - 1) * limit;
-    const search  = req.query.search || '';
-    const sortBy  = req.query.sortBy || 'created_at';
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
+    const skip = (page - 1) * limit;
+    const search = req.query.search || '';
+    const sortBy = req.query.sortBy || 'created_at';
     const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
 
     const filter = { campaign_id: campaignId, user_id: userId, deleted_at: null };
@@ -1167,11 +1167,11 @@ export const getAdsByAdSet = async (req, res) => {
   try {
     const userId = getOwnerId(req.user);
     const adsetId = req.params.id;
-    const page    = Math.max(1, parseInt(req.query.page)  || 1);
-    const limit   = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
-    const skip    = (page - 1) * limit;
-    const search  = req.query.search || '';
-    const sortBy  = req.query.sortBy || 'created_at';
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
+    const skip = (page - 1) * limit;
+    const search = req.query.search || '';
+    const sortBy = req.query.sortBy || 'created_at';
     const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
 
     const filter = { ad_set_id: adsetId, user_id: userId, deleted_at: null };
@@ -1361,7 +1361,7 @@ export const deleteFbAdSet = async (req, res) => {
 
     const connection = await requireConnection(userId);
     if (connection && adset.fb_adset_id) {
-       await axios.delete(`${BASE}/${adset.fb_adset_id}`, { params: { access_token: connection.long_lived_access_token } });
+      await axios.delete(`${BASE}/${adset.fb_adset_id}`, { params: { access_token: connection.long_lived_access_token } });
     }
 
     const now = new Date();
@@ -1562,7 +1562,7 @@ export const deleteFbAd = async (req, res) => {
 
     const connection = await requireConnection(userId);
     if (connection && ad.fb_ad_id) {
-       await axios.delete(`${BASE}/${ad.fb_ad_id}`, { params: { access_token: connection.long_lived_access_token } });
+      await axios.delete(`${BASE}/${ad.fb_ad_id}`, { params: { access_token: connection.long_lived_access_token } });
     }
 
     ad.deleted_at = new Date();
@@ -1660,25 +1660,25 @@ export const getFbAdInsights = async (req, res) => {
 
     let creativePerformance = [];
     if (level !== 'ad') {
-       const rawAds = adBreakdownRes.data.data || [];
-       const localAds = await FacebookAd.find({ fb_ad_id: { $in: rawAds.map(ra => ra.ad_id) } }).lean();
+      const rawAds = adBreakdownRes.data.data || [];
+      const localAds = await FacebookAd.find({ fb_ad_id: { $in: rawAds.map(ra => ra.ad_id) } }).lean();
 
-       creativePerformance = rawAds.map(ra => {
-         const local = localAds.find(la => la.fb_ad_id === ra.ad_id);
-         const msgActions = (ra.actions || []).find(a => a.action_type === 'onsite_conversion.messaging_first_reply');
-         const startActions = (ra.actions || []).find(a => a.action_type === 'messaging_conversation_started_7d');
-         const results = msgActions ? parseInt(msgActions.value || 0) : (startActions ? parseInt(startActions.value || 0) : 0);
+      creativePerformance = rawAds.map(ra => {
+        const local = localAds.find(la => la.fb_ad_id === ra.ad_id);
+        const msgActions = (ra.actions || []).find(a => a.action_type === 'onsite_conversion.messaging_first_reply');
+        const startActions = (ra.actions || []).find(a => a.action_type === 'messaging_conversation_started_7d');
+        const results = msgActions ? parseInt(msgActions.value || 0) : (startActions ? parseInt(startActions.value || 0) : 0);
 
-         const spend = Math.round(parseFloat(ra.spend || 0) * 100) / 100;
-         return {
-           ad_id: ra.ad_id,
-           name: local?.name || 'Unknown Ad',
-           image: local?.local_media?.image || null,
-           spend,
-           results,
-           cost_per_result: results > 0 ? (spend / results) : 0
-         };
-       });
+        const spend = Math.round(parseFloat(ra.spend || 0) * 100) / 100;
+        return {
+          ad_id: ra.ad_id,
+          name: local?.name || 'Unknown Ad',
+          image: local?.local_media?.image || null,
+          spend,
+          results,
+          cost_per_result: results > 0 ? (spend / results) : 0
+        };
+      });
     }
 
     return res.json({
@@ -1803,13 +1803,13 @@ export const updateFbAdCampaign = async (req, res) => {
     }
 
     if (targeting && record.fb_adset_id) {
-       await axios.post(`${BASE}/${record.fb_adset_id}`, null, {
-         params: {
-           targeting: JSON.stringify(targeting),
-           access_token: token
-         }
-       });
-       record.targeting = targeting;
+      await axios.post(`${BASE}/${record.fb_adset_id}`, null, {
+        params: {
+          targeting: JSON.stringify(targeting),
+          access_token: token
+        }
+      });
+      record.targeting = targeting;
     }
 
 

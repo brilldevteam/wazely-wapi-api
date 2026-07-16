@@ -129,6 +129,11 @@ const messageSchema = new mongoose.Schema({
     ref: 'WhatsappConnection',
     default: null
   },
+  whatsapp_phone_number_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'WhatsappPhoneNumber',
+    default: null
+  },
   provider: {
     type: String,
     enum: ['business_api', 'baileys', 'telegram', 'facebook', 'instagram', 'twitter'],

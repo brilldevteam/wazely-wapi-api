@@ -1,6 +1,8 @@
-import { AutomationFlow, AutomationExecution } from '../models/index.js';
+import mongoose from 'mongoose';
+import { AutomationFlow, AutomationExecution, AIModel, UserSetting } from '../models/index.js';
 import automationEngine from '../utils/automation-engine.js';
 import automationCache from '../utils/automation-cache.js';
+import { callAIModel } from '../utils/ai-utils.js';
 
 const SORT_ORDER = {
   ASC: 1,
@@ -57,17 +59,27 @@ export const getAutomationFlows = async (req, res) => {
     const { sortField, sortOrder } = parseSortParams(req.query);
     const searchQuery = buildSearchQuery(req.query.search);
 
-    const { is_active = '' } = req.query;
+    const { is_active = '', status = '', platform = '' } = req.query;
 
-    if (searchQuery) {
-      searchQuery.user_id = userId;
-      searchQuery.deleted_at = null;
-      if (workspaceId) {
-        searchQuery.workspace_id = workspaceId;
-      }
+    searchQuery.user_id = userId;
+    searchQuery.deleted_at = null;
+    if (workspaceId) {
+      searchQuery.workspace_id = workspaceId;
+    }
+    if (platform) {
+      searchQuery.platform = platform;
     }
 
-    if (is_active !== '') {
+    if (status === 'active') {
+      searchQuery.is_active = true;
+      searchQuery.is_paused = { $ne: true };
+    } else if (status === 'draft') {
+      searchQuery.is_active = false;
+    } else if (status === 'paused') {
+      searchQuery.is_active = true;
+      searchQuery.is_paused = true;
+    } else if (status === 'all') {
+    } else if (is_active !== '') {
       searchQuery.is_active = is_active === 'true';
     }
 
@@ -145,7 +157,7 @@ export const createAutomationFlow = async (req, res) => {
   try {
     const userId = req.user.owner_id;
     const workspaceId = req.headers['x-workspace-id'] || req.body.workspace_id;
-    const { name, description, nodes, connections, triggers, settings, platform } = req.body;
+    const { name, description, nodes, connections, triggers, settings, platform, is_active } = req.body;
 
     if (!name || !nodes || !Array.isArray(nodes)) {
       return res.status(400).json({
@@ -154,7 +166,7 @@ export const createAutomationFlow = async (req, res) => {
       });
     }
 
-    const flow = await AutomationFlow.create({
+    const flowData = {
       name,
       description: description || '',
       user_id: userId,
@@ -164,7 +176,13 @@ export const createAutomationFlow = async (req, res) => {
       connections: connections || [],
       triggers: triggers || [],
       settings: settings || {}
-    });
+    };
+
+    if (is_active !== undefined) {
+      flowData.is_active = is_active;
+    }
+
+    const flow = await AutomationFlow.create(flowData);
 
     automationCache.clearUserCache(userId);
 
@@ -210,13 +228,45 @@ export const updateAutomationFlow = async (req, res) => {
       });
     }
 
+  if (nodes !== undefined && Array.isArray(nodes)) {
+      const prevChatbotIds = new Set(
+        (flow.nodes || [])
+          .filter(n => n.type === 'assign_chatbot' && n.parameters?.chatbot_id)
+          .map(n => String(n.parameters.chatbot_id))
+      );
+      const newChatbotIds = new Set(
+        nodes
+          .filter(n => n.type === 'assign_chatbot' && n.parameters?.chatbot_id)
+          .map(n => String(n.parameters.chatbot_id))
+      );
+
+      const removedChatbotIds = [...prevChatbotIds].filter(id => !newChatbotIds.has(id));
+
+      if (removedChatbotIds.length > 0) {
+        const { default: Contact } = await import('../models/contact.model.js');
+        await Contact.updateMany(
+          {
+            created_by: userId,
+            assigned_chatbot: { $in: removedChatbotIds },
+            deleted_at: null
+          },
+          { $set: { assigned_chatbot: null, chatbot_paused: false } }
+        );
+        console.log(`[updateAutomationFlow] Unassigned removed chatbot(s) [${removedChatbotIds.join(', ')}] from contacts after flow edit.`);
+      }
+    }
+
     if (name !== undefined) flow.name = name;
     if (description !== undefined) flow.description = description;
     if (nodes !== undefined) flow.nodes = nodes;
     if (connections !== undefined) flow.connections = connections;
     if (triggers !== undefined) flow.triggers = triggers;
     if (settings !== undefined) flow.settings = settings;
-    if (is_active !== undefined) flow.is_active = is_active;
+    if (is_active !== undefined) {
+      if (!(flow.is_active === true && is_active === false)) {
+        flow.is_active = is_active;
+      }
+    }
     if (platform !== undefined) flow.platform = platform;
     if (workspaceId !== undefined) flow.workspace_id = workspaceId;
 
@@ -311,6 +361,13 @@ export const toggleAutomationFlow = async (req, res) => {
       });
     }
 
+    if (flow.is_active === true && is_active === false) {
+      return res.status(400).json({
+        success: false,
+        message: 'Once an automation is published, it cannot be reverted to draft. Please pause it instead.'
+      });
+    }
+
     flow.is_active = is_active;
     await flow.save();
 
@@ -332,38 +389,246 @@ export const toggleAutomationFlow = async (req, res) => {
 };
 
 
+export const togglePauseAutomationFlow = async (req, res) => {
+  try {
+    const userId = req.user.owner_id;
+    const workspaceId = req.headers['x-workspace-id'] || req.body.workspace_id;
+    const { flowId } = req.params;
+    const { is_paused } = req.body;
+
+    if (typeof is_paused !== 'boolean') {
+      return res.status(400).json({ success: false, message: 'is_paused boolean flag is required' });
+    }
+
+    const query = { _id: flowId, user_id: userId, deleted_at: null };
+    if (workspaceId) query.workspace_id = workspaceId;
+
+    const flow = await AutomationFlow.findOne(query);
+    if (!flow) {
+      return res.status(404).json({ success: false, message: 'Automation flow not found' });
+    }
+
+    flow.is_paused = is_paused;
+    await flow.save();
+
+     if (flow.nodes && Array.isArray(flow.nodes)) {
+      const chatbotIds = flow.nodes
+        .filter(node => node.type === 'assign_chatbot' && node.parameters && node.parameters.chatbot_id)
+        .map(node => node.parameters.chatbot_id);
+
+      if (chatbotIds.length > 0) {
+        const { default: Chatbot } = await import('../models/chatbot.model.js');
+        await Chatbot.updateMany(
+          { _id: { $in: chatbotIds }, user_id: userId },
+          { $set: { status: is_paused ? 'inactive' : 'active' } }
+        );
+
+      if (is_paused) {
+          const { default: Contact } = await import('../models/contact.model.js');
+          await Contact.updateMany(
+            {
+              created_by: userId,
+              assigned_chatbot: { $in: chatbotIds },
+              deleted_at: null
+            },
+            { $set: { assigned_chatbot: null, chatbot_paused: false } }
+          );
+          console.log(`[togglePauseAutomationFlow] Unassigned chatbot(s) [${chatbotIds.join(', ')}] from contacts because flow ${flowId} was paused.`);
+        }
+      }
+
+      const sequenceIds = flow.nodes
+        .filter(node => node.type === 'send_sequence' && node.parameters && node.parameters.sequence_id)
+        .map(node => node.parameters.sequence_id);
+
+      if (sequenceIds.length > 0) {
+        const { default: Sequence } = await import('../models/sequence.model.js');
+        await Sequence.updateMany(
+          { _id: { $in: sequenceIds }, user_id: userId },
+          { $set: { is_active: !is_paused } }
+        );
+      }
+
+      const appointmentIds = flow.nodes
+        .filter(node => node.type === 'appointment_flow' && node.parameters && node.parameters.appointment_config_id)
+        .map(node => node.parameters.appointment_config_id);
+
+      if (appointmentIds.length > 0) {
+        const { default: AppointmentConfig } = await import('../models/appointment-config.model.js');
+        await AppointmentConfig.updateMany(
+          { _id: { $in: appointmentIds }, user_id: userId },
+          { $set: { status: is_paused ? 'inactive' : 'active' } }
+        );
+      }
+
+      const formIds = flow.nodes
+        .filter(node => node.type === 'form_flow' && node.parameters && node.parameters.form_id)
+        .map(node => node.parameters.form_id);
+
+      if (formIds.length > 0) {
+        const { default: Form } = await import('../models/formBuilder.model.js');
+        await Form.updateMany(
+          { _id: { $in: formIds }, user_id: userId },
+          { $set: { is_active: !is_paused } }
+        );
+      }
+    }
+
+    automationCache.invalidateFlowCache(flowId, userId);
+
+    res.json({
+      success: true,
+      message: `Automation flow ${is_paused ? 'paused' : 'resumed'} successfully`,
+      data: flow
+    });
+  } catch (error) {
+    console.error('Error toggling pause for automation flow:', error);
+    res.status(500).json({ success: false, message: 'Failed to update automation flow pause state', error: error.message });
+  }
+};
+
+
 export const testAutomationFlow = async (req, res) => {
   try {
     const userId = req.user.owner_id;
     const { flowId } = req.params;
 
-    const { test_data } = req.body;
+    const test_data = req.body.test_data || {};
+    const { unsaved_flow } = req.body;
     test_data.userId = userId;
 
-    const flow = await AutomationFlow.findOne({
-      _id: flowId,
-      user_id: userId,
-      is_active: true,
-      deleted_at: null
-    });
+    const sessionId = test_data.test_session_id || userId;
+    const senderNumber = `test_simulator_${sessionId}`;
 
-    if (!flow) {
-      return res.status(404).json({
-        success: false,
-        message: 'Automation flow not found or not active'
+    if (test_data.reset) {
+      await AutomationExecution.updateMany(
+        { contact_identifier: senderNumber, user_id: userId, status: 'waiting' },
+        { $set: { status: 'failed', error: 'Test execution reset by user' } }
+      );
+      return res.json({
+        success: true,
+        message: 'Automation flow test reset successful',
+        data: { reset: true }
       });
     }
 
-    const result = await automationEngine.executeFlow(flow, {
+    let flow;
+    let isTempFlow = false;
+    let tempFlowId = flowId;
+
+    if (unsaved_flow) {
+      if (flowId === 'new' || flowId === 'draft' || !mongoose.Types.ObjectId.isValid(flowId)) {
+        tempFlowId = mongoose.Types.ObjectId.isValid(sessionId) ? sessionId : new mongoose.Types.ObjectId();
+        isTempFlow = true;
+      }
+      flow = {
+        _id: tempFlowId,
+        user_id: userId,
+        name: 'Test Flow',
+        nodes: unsaved_flow.nodes || [],
+        connections: unsaved_flow.connections || [],
+        triggers: unsaved_flow.triggers || []
+      };
+    } else {
+      flow = await AutomationFlow.findOne({
+        _id: flowId,
+        user_id: userId,
+        deleted_at: null
+      });
+
+      if (!flow) {
+        return res.status(404).json({
+          success: false,
+          message: 'Automation flow not found'
+        });
+      }
+    }
+
+    const { message, interactive_id, messageType = 'text' } = test_data;
+    const recipientNumber = 'bot';
+
+    const messagePayload = automationEngine.normalizeMessagePayload(message);
+
+    const waitingQuery = {
+      contact_identifier: senderNumber,
+      status: 'waiting',
+      user_id: userId
+    };
+
+    if (mongoose.Types.ObjectId.isValid(tempFlowId)) {
+      waitingQuery.flow_id = tempFlowId;
+    }
+
+    const waitingExecution = await AutomationExecution.findOne(waitingQuery).sort({ updated_at: -1 });
+
+    let result;
+
+    if (waitingExecution) {
+      result = await automationEngine.resumeExecution(flow, waitingExecution, { message, interactive_id }, messagePayload);
+
+      const updatedExecution = await AutomationExecution.findById(waitingExecution._id);
+
+      const cleanExecutionLog = (result.executionLog || updatedExecution.execution_log || []).map(log => ({
+        node_id: log.node_id,
+        node_type: log.node_type,
+        status: log.status,
+        start_time: log.start_time,
+        end_time: log.end_time,
+        error: log.error
+      }));
+
+      return res.json({
+        success: true,
+        data: {
+          triggered: true,
+          success: updatedExecution.status !== 'failed',
+          output: result.output || updatedExecution.input_data,
+          executionLog: cleanExecutionLog,
+          status: updatedExecution.status
+        }
+      });
+    }
+
+    const shouldExecute = automationEngine.checkMessageTriggerConditions(flow, message, senderNumber, recipientNumber, messageType, null, { interactive_id }, messagePayload);
+
+    if (!shouldExecute.match) {
+      return res.json({
+        success: true,
+        message: 'Flow trigger conditions not met by this message.',
+        data: { triggered: false, executionLog: [] }
+      });
+    }
+
+    result = await automationEngine.executeFlow(flow, {
       ...test_data,
-      event_type: 'test',
+      is_test: true,
+      test_responses: [],
+      senderNumber,
+      recipientNumber,
+      message,
+      interactive_id,
+      messagePayload,
+      event_type: 'message_received',
       timestamp: new Date()
     });
+
+    const cleanExecutionLog = (result.executionLog || []).map(log => ({
+      node_id: log.node_id,
+      node_type: log.node_type,
+      status: log.status,
+      start_time: log.start_time,
+      end_time: log.end_time,
+      error: log.error
+    }));
 
     res.json({
       success: true,
       message: 'Automation flow test completed',
-      data: result
+      data: {
+        triggered: true,
+        ...result,
+        executionLog: cleanExecutionLog
+      }
     });
   } catch (error) {
     console.error('Error testing automation flow:', error);
@@ -1208,6 +1473,30 @@ export const getAvailableNodeTypes = async (req, res) => {
             ]
           }
         ]
+      },
+      {
+        id: 'send_sequence',
+        name: 'Send Sequence',
+        description: 'Enroll the contact into a predefined sequence',
+        category: 'action',
+        icon: 'sequence',
+        inputs: 1,
+        outputs: 1,
+        parameters: [
+          { name: 'sequence_id', type: 'text', label: 'Sequence ID', required: true }
+        ]
+      },
+      {
+        id: 'run_sub_flow',
+        name: 'Run Sub Flow',
+        description: 'Execute another published automation flow',
+        category: 'action',
+        icon: 'flow',
+        inputs: 1,
+        outputs: 1,
+        parameters: [
+          { name: 'sub_flow_id', type: 'text', label: 'Sub Flow ID', required: true }
+        ]
       }
     ];
 
@@ -1230,6 +1519,218 @@ export const preloadUserFlows = async (userId) => {
   return await automationCache.preloadUserFlows(userId);
 };
 
+export const suggestAutomationFlow = async (req, res) => {
+  try {
+    const { businessName, language, industry, occasion, purpose, action, tone, additionalDetails, platform } = req.body;
+    const userId = req.user.owner_id;
+
+    if (!businessName || !language || !industry || !purpose || !action || !tone) {
+      return res.status(400).json({
+        success: false,
+        message: "All fields are required: businessName, language, industry, purpose, action, tone",
+      });
+    }
+
+    const userSettings = await UserSetting.findOne({ user_id: userId });
+
+    if (!userSettings || !userSettings.ai_model || !userSettings.api_key) {
+      return res.status(400).json({
+        success: false,
+        message: "Please select model and add API key in settings",
+      });
+    }
+
+    const { ai_model: modelId, api_key: apiKey } = userSettings;
+
+    const aiModelDoc = await AIModel.findOne({
+      _id: modelId,
+      status: "active",
+      deleted_at: null,
+    });
+
+    if (!aiModelDoc) {
+      return res.status(404).json({
+        success: false,
+        message: "AI model not found or inactive",
+      });
+    }
+
+    const aiModel = aiModelDoc.toObject();
+    if (!aiModel.config) aiModel.config = {};
+    aiModel.config.max_tokens = 4096;
+
+    let platformRules = '';
+    if (platform === 'all') {
+      platformRules = '\n  - CRITICAL: You MUST NOT use "send_template" or "form_flow" nodes. These are NOT supported on omnichannel.';
+    } else if (['telegram', 'instagram', 'facebook'].includes(platform)) {
+      platformRules = '\n  - CRITICAL: You MUST NOT use the "form_flow" node. It is strictly for WhatsApp only.';
+    }
+
+    const prompt = `You are an expert ${platform === 'all' ? 'Omnichannel' : platform} automation architect. Create a highly cohesive and professional automation flow sequence using the details below.
+
+Business Name: ${businessName}
+Language: ${language}
+Industry: ${industry}
+Occasion: ${occasion || 'General'}
+Purpose: ${purpose}
+Action: ${action}
+Tone: ${tone}
+Additional Details: ${additionalDetails || "None provided"}
+
+Return the flow in the following JSON format ONLY:
+
+{
+  "name": "Generated Flow Name",
+  "description": "Short description of the flow",
+  "triggers": [
+    {
+      "event_type": "message_received",
+      "conditions": {
+        "field": "message",
+        "operator": "contains_any",
+        "value": ["sale", "help"]
+      }
+    }
+  ],                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            
+  "nodes": [
+    {
+      "id": "trigger_1",
+      "type": "trigger",
+      "position": { "x": 100, "y": 300 },
+      "parameters": {
+        "nodeType": "trigger",
+        "label": "Incoming Message",
+        "triggerType": "contains keyword",                                                                                                                                                                                                                                                                                                                                                                                                                                                          
+        "keywords": ["sale", "help"],
+        "contactType": "Contact"
+      }
+    },
+    {
+      "id": "cond_1",
+      "type": "condition",
+      "position": { "x": 400, "y": 300 },
+      "parameters": {
+        "nodeType": "condition",
+        "label": "Logic Control",
+        "conditions": [
+          { "id": "branch_1", "field": "message.body", "operator": "contains_any", "value": ["sale", "help"], "sourceHandle": "branch_1" }
+        ],
+        "no_match_handle": "no_match"
+      }
+    },
+    {
+      "id": "node_1",
+      "type": "send_message",
+      "position": { "x": 700, "y": 300 },
+      "parameters": {
+        "nodeType": "text_message",
+        "label": "Send Message",
+        "message": "Hello! How can we help you today?"
+      }
+    }
+  ],
+  "connections": [
+    {
+      "id": "edge_1",
+      "source": "trigger_1",
+      "target": "cond_1",
+      "sourceHandle": "src",
+      "targetHandle": "tgt"
+    },
+    {
+      "id": "edge_2",
+      "source": "cond_1",
+      "target": "node_1",
+      "sourceHandle": "branch_1",
+      "targetHandle": "tgt"
+    }
+  ]
+}
+
+STRICT RULES:
+1. You MUST generate EXACTLY ONE node with type "trigger". IT MUST BE THE SINGLE ENTRY POINT OF THE FLOW.
+2. The entire flow MUST be a single cohesive tree connected by the "connections" array starting from "trigger_1". DO NOT create disconnected fragments or multiple triggers.
+3. Every edge in "connections" MUST include "sourceHandle" and "targetHandle" (normally "src" and "tgt").
+4. Interactive Branching Rules:
+   - For edges originating from a "button_message" node, "sourceHandle" MUST be "src-btn-0" for the first button, "src-btn-1" for the second, etc.
+   - For edges originating from a "list_message" node, "sourceHandle" MUST be "src-item-0" for the first item, "src-item-1" for the second, etc.
+   - For edges originating from a "condition" node, "sourceHandle" MUST match the "sourceHandle" of the matching condition object (e.g., "branch_1"), or "no_match" for unmatched.
+   - For edges originating from an "advanced_condition" node, "sourceHandle" MUST be "if-true" or "if-false".
+   - For edges originating from an "ask_and_wait" node, "sourceHandle" MUST be the route value of the expected answer (e.g., "route_1"), or "fallback" for unmatched.
+5. EVERY SINGLE NODE (except the trigger) MUST be the target of at least one connection. THERE CAN BE NO ORPHANED OR DISCONNECTED NODES.
+6. Node Schema Mapping:
+   Each node in the "nodes" array MUST have one of the following exact "type" properties, with the corresponding "nodeType" inside "parameters":
+   - "trigger": parameters = { "nodeType": "trigger", "label": "Incoming Message", "triggerType": "contains keyword"|"on exact match"|"starts with"|"any message"|"order received", "keywords": ["kw1"], "contactType": "Contact" }
+   - "send_message" (used for text, button, list, media, or location messages):
+     - nodeType = "text_message": parameters = { "nodeType": "text_message", "label": "Send Message", "message": "Text content" }
+     - nodeType = "button_message": parameters = { "nodeType": "button_message", "label": "Quick Reply", "message": "Body text", "buttons": [{"text": "Btn Text", "value": "btn_1"}] } (max 3 buttons)
+     - nodeType = "list_message": parameters = { "nodeType": "list_message", "label": "Selection List", "bodyText": "Body text", "headerText": "Header", "footerText": "Footer", "buttonText": "View Menu", "sections": [{"title": "Category", "items": [{"title": "Option 1", "description": "Desc"}]}] }
+     - nodeType = "media_message": parameters = { "nodeType": "media_message", "label": "Send Media", "mediaType": "image"|"video"|"document"|"audio", "mediaUrl": "https://...", "caption": "Caption text" }
+     - nodeType = "location": parameters = { "nodeType": "location", "label": "Send Location", "lat": 12.9716, "lng": 77.5946, "name": "Name", "address": "Address" }
+   - "condition": parameters = { "nodeType": "condition", "label": "Logic Control", "conditions": [{"id": "branch_1", "field": "message.body"|"sender.phone"|"sender.name", "operator": "contains"|"contains_any"|"equals"|"equals_any"|"starts_with"|"ends_with"|"exists", "value": ["val"], "sourceHandle": "branch_1"}], "no_match_handle": "no_match" }
+   - "advanced_condition": parameters = { "nodeType": "advanced_condition", "label": "Advanced Condition", "match_type": "AND"|"OR", "rules": [{"field": "message.body"|"sender.phone"|"sender.name", "operator": "contains"|"contains_any"|"equals"|"equals_any"|"starts_with"|"ends_with"|"exists", "value": "val"}] }
+   - "wait_for_reply": parameters = { "nodeType": "wait_for_reply", "label": "Wait For Reply", "variable_name": "variable_to_store" }
+   - "ask_and_wait": parameters = { "nodeType": "ask_and_wait", "label": "Ask & Wait", "message_body": "Question?", "expected_answers": [{"value": "Yes", "route": "route_1"}], "fallback_route": "fallback", "timeout_minutes": 10 }
+   - "send_template": parameters = { "nodeType": "send_template", "label": "Send Template", "template_name": "name", "language_code": "en_US", "body_variables": {"1": "var1"} }
+   - "cta_button": parameters = { "nodeType": "cta_button", "label": "Call To Action", "message": "Text", "button_text": "Click Here", "url": "https://..." }
+   - "assign_chatbot": parameters = { "nodeType": "assign_chatbot", "label": "Assign Chatbot", "chatbot_id": "id" }
+   - "save_to_google_sheet": parameters = { "nodeType": "save_to_google_sheet", "label": "Save to Google Sheet", "spreadsheet_id": "id", "worksheet_id": "id", "mappings": [{"column": "A", "variable": "name"}] }
+   - "send_google_form": parameters = { "nodeType": "send_google_form", "label": "Send Google Form", "google_form_id": "id" }
+   - "create_calendar_event": parameters = { "nodeType": "create_calendar_event", "label": "Create Calendar Event", "event_title": "Reservation", "start_time": "{{reservation_date}} {{reservation_time}}" }
+   - "create_google_meet": parameters = { "nodeType": "create_google_meet", "label": "Create Google Meet", "meet_title": "Title" }
+   - "add_tag": parameters = { "nodeType": "add_tag", "label": "Assign Tag", "tag_name": "tag" }
+   - "remove_tag": parameters = { "nodeType": "remove_tag", "label": "Remove Tag", "tag_ids": ["id"] }
+   - "webhook": parameters = { "nodeType": "webhook", "label": "Webhook", "url": "https://...", "method": "POST"|"GET", "headers": {}, "body": {} }
+   - "form_flow": parameters = { "nodeType": "form_flow", "label": "Form Flow", "form_id": "id", "message_body": "Body text", "button_text": "Open Form" }
+   - "add_to_segment": parameters = { "nodeType": "add_segment", "label": "Add to Segment", "segment_id": "id" }
+   - "update_contact": parameters = { "nodeType": "update_contact", "label": "Update Contact", "updates": [{"field_key": "name", "value": "value"}] }
+   - "assign_agent": parameters = { "nodeType": "assign_agent", "label": "Assign Agent", "agent_id": "id" }
+   - "assign_random_agent": parameters = { "nodeType": "assign_random_agent", "label": "Assign Random Agent", "agent_ids": ["id"] }
+   - "send_sequence": parameters = { "nodeType": "send_sequence", "label": "Send Sequence", "sequence_id": "id" }
+   - "run_sub_flow": parameters = { "nodeType": "run_sub_flow", "label": "Run Sub Flow", "sub_flow_id": "id" }
+   - "appointment_flow": parameters = { "nodeType": "appointment_flow", "label": "Appointment Flow", "appointment_type_id": "id" }
+   - "send_catalog": parameters = { "nodeType": "send_catalog", "label": "Send Catalog Product", "product_id": "id" }
+   - "send_shopify": parameters = { "nodeType": "send_shopify", "label": "Send Shopify Product", "product_id": "id" }
+   - "move_to_pipeline_stage": parameters = { "nodeType": "move_to_pipeline_stage", "label": "Move Pipeline Stage", "funnel_id": "id", "stage_id": "id" }
+   - "response_saver": parameters = { "nodeType": "response_saver", "label": "Save Response", "mappings": [{"source_path": "message", "variable_name": "var", "custom_field_key": "custom_field"}] }
+   - "delay": parameters = { "nodeType": "delay", "label": "Wait Timer", "delay_ms": 1000 }
+   - "api": parameters = { "nodeType": "api", "label": "External API", "url": "https://...", "method": "GET"|"POST", "headers": {}, "body": {}, "response_mapping": [{"response_path": "path", "variable_name": "var", "custom_field_key": "custom_field"}] }
+7. You MUST NOT use any other node types or properties that are not listed here.${platformRules}
+8. Generate all customer-facing text in ${language} language with a ${tone} tone.
+9. Position coordinates (x, y) must space nodes out properly (e.g. increase x by 300 for each step).
+10. If you cannot comply exactly, return an empty JSON object {}.
+11. Return ONLY the raw JSON object - NO markdown backticks, NO explanations, NO additional text.
+`;
+
+    const aiResponse = await callAIModel(userId, aiModel, apiKey, prompt);
+
+    let cleanResponse = aiResponse
+      .replace(/```json/g, "")
+      .replace(/```/g, "")
+      .trim();
+
+    let parsedData = null;
+    try {
+      parsedData = JSON.parse(cleanResponse);
+    } catch (e) {
+      console.error("Failed to parse AI generated flow", e);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Automation flow generated successfully",
+      data: parsedData ? [parsedData] : [{ raw_response: cleanResponse }]
+    });
+  } catch (error) {
+    console.error("Error in suggestAutomationFlow:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: error.message,
+    });
+  }
+};
+
 export default {
   getAutomationFlows,
   getAutomationFlow,
@@ -1237,10 +1738,12 @@ export default {
   updateAutomationFlow,
   deleteAutomationFlow,
   toggleAutomationFlow,
+  togglePauseAutomationFlow,
   testAutomationFlow,
   getAutomationExecutions,
   getAutomationExecution,
   getAutomationStatistics,
   getAvailableNodeTypes,
-  preloadUserFlows
+  preloadUserFlows,
+  suggestAutomationFlow
 };

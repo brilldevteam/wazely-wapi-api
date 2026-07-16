@@ -250,9 +250,9 @@ export const createSequenceStep = async (req, res) => {
         const materialQuery = { _id: reply_material_id, waba_id: sequence.waba_id, deleted_at: null };
 
         if (reply_material_type === 'ReplyMaterial') {
-            material = await ReplyMaterial.findOne(materialQuery);
+            material = await ReplyMaterial.findOne({ _id: reply_material_id, deleted_at: null });
         } else if (reply_material_type === 'Template') {
-            material = await Template.findOne({ _id: reply_material_id, waba_id: sequence.waba_id, status: 'approved' });
+            material = await Template.findOne({ _id: reply_material_id, $or: [{ waba_id: sequence.waba_id }, { waba_id: null }], status: 'approved' });
         } else if (reply_material_type === 'EcommerceCatalog') {
             material = await EcommerceCatalog.findOne(materialQuery);
         } else {
@@ -338,9 +338,9 @@ export const updateSequenceStep = async (req, res) => {
             const materialQuery = { _id: materialId, waba_id: sequence.waba_id, deleted_at: null };
 
             if (materialType === 'ReplyMaterial') {
-                material = await ReplyMaterial.findOne(materialQuery);
+                material = await ReplyMaterial.findOne({ _id: materialId, deleted_at: null });
             } else if (materialType === 'Template') {
-                material = await Template.findOne({ _id: materialId, waba_id: sequence.waba_id, status: 'approved' });
+                material = await Template.findOne({ _id: materialId, $or: [{ waba_id: sequence.waba_id }, { waba_id: null }], status: 'approved' });
             } else if (materialType === 'EcommerceCatalog') {
                 material = await EcommerceCatalog.findOne(materialQuery);
             } else {

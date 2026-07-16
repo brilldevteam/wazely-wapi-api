@@ -4,7 +4,7 @@ import { uploadSingle } from '../utils/upload.js';
 import { Setting } from '../models/index.js';
 const WHATSAPP_JID_SUFFIX = '@s.whatsapp.net';
 import axios from 'axios';
-import { WhatsappConnection } from '../models/index.js';
+import { WhatsappConnection, EcommerceProduct } from '../models/index.js';
 import { assignChatToAgent as assignChatToAgentFromChat } from './chat.controller.js';
 import paymentLinkService from '../services/payment-link.service.js';
 import mongoose from 'mongoose';
@@ -169,6 +169,7 @@ const groupMessagesByDateAndSender = (messages, replyMessagesMap = {}, reactions
       messageType: message.message_type,
       fileUrl: message.file_url || null,
       template: message.template_id || null,
+      metadata: message.metadata || null,
       createdAt: message.wa_timestamp,
       can_chat: message.can_chat,
       delivered_at: message.delivered_at || null,
@@ -271,22 +272,58 @@ export const sendMessage = async (req, res) => {
       templateComponents: templateComponentsInput,
       mediaUrl,
       mediaUrls,
-      location,
+      location: locationInput,
       replyMessageId,
       reactionMessageId,
       reactionEmoji,
-      amount,
+      amount: rawAmount,
       description,
       gateway_id,
       currency,
       coupon_code,
       carouselCardsData,
       carouselProducts,
-      template_id: templateIdInput
+      template_id: templateIdInput,
+      google_account_id,
+      meet_start_time,
+      meet_end_time
     } = req.body;
 
-    const uploadedFile = req.file || (req.files && req.files['file_url'] ? req.files['file_url'][0] : null);
+    const amount = rawAmount ? Math.round(Number(rawAmount) * 100) : undefined;
+
+    const uploadedFiles = req.files && req.files['file_url'] ? req.files['file_url'] : (req.file ? [req.file] : []);
+    const uploadedFile = uploadedFiles[0] || null;
     const carouselUploadedFiles = req.files && req.files['carousel_files'] ? req.files['carousel_files'] : [];
+
+    let parsedMediaUrls = [];
+    if (mediaUrls) {
+      if (Array.isArray(mediaUrls)) {
+        parsedMediaUrls = mediaUrls;
+      } else if (typeof mediaUrls === 'string') {
+        try {
+          const parsed = JSON.parse(mediaUrls);
+          parsedMediaUrls = Array.isArray(parsed) ? parsed : [mediaUrls];
+        } catch (_) {
+          parsedMediaUrls = [mediaUrls];
+        }
+      }
+    } else if (mediaUrl) {
+      parsedMediaUrls = [mediaUrl];
+    }
+    const totalMediaCount = parsedMediaUrls.length + uploadedFiles.length;
+
+    let parsedLocation = null;
+    if (locationInput) {
+      if (typeof locationInput === 'string') {
+        try {
+          parsedLocation = JSON.parse(locationInput);
+        } catch (_) {
+          parsedLocation = null;
+        }
+      } else {
+        parsedLocation = locationInput;
+      }
+    }
 
     let resolvedCarouselCardsData = carouselCardsData;
     if (carouselUploadedFiles.length > 0) {
@@ -362,7 +399,7 @@ export const sendMessage = async (req, res) => {
               file: uploadedFile,
               messageType: messageTypeInput,
               interactiveType,
-              buttonParams,
+              buttonParams: buttonParams || buttons,
               listParams,
               templateName,
               languageCode,
@@ -371,11 +408,11 @@ export const sendMessage = async (req, res) => {
               providerType: provider,
               connectionId,
               mediaUrl: uploadedFile ? uploadedFile.path : ((mediaUrls && mediaUrls.length === 1) ? mediaUrls[0] : mediaUrl),
-              locationParams: messageTypeInput === 'location' && location ? {
-                latitude: location.latitude,
-                longitude: location.longitude,
-                name: location.name || undefined,
-                address: location.address || undefined
+              locationParams: messageTypeInput === 'location' && parsedLocation ? {
+                latitude: parsedLocation.latitude,
+                longitude: parsedLocation.longitude,
+                name: parsedLocation.name || undefined,
+                address: parsedLocation.address || undefined
               } : undefined,
               couponCode: coupon_code,
               carouselCardsData: resolvedCarouselCardsData,
@@ -404,6 +441,70 @@ export const sendMessage = async (req, res) => {
     let messageType = messageTypeInput || req.body.type || req.body.message_type || 'text';
     let whatsappPhoneNumberId = whatsappPhoneNumberIdInput;
     let contactId = contactIdInput;
+
+    if (messageType === 'google_meet') {
+      const { default: GoogleAccount } = await import('../models/google-account.model.js');
+      const { getCalendarClient } = await import('../utils/google-api-helper.js');
+      const { default: Contact } = await import('../models/contact.model.js');
+
+      let query = {
+        user_id: userId,
+        status: 'active',
+        deleted_at: null
+      };
+
+      if (google_account_id) {
+        query._id = google_account_id;
+      }
+
+      const googleAccount = await GoogleAccount.findOne(query);
+
+      if (!googleAccount) {
+        return res.status(400).json({ success: false, error: 'No active Google Account connected, or the specified account is invalid. Please connect your Google Account in settings.' });
+      }
+
+      try {
+        let contactName = 'Client';
+        if (contactId) {
+          const currentContact = await Contact.findById(contactId).select('name phone_number');
+          if (currentContact) contactName = currentContact.name || currentContact.phone_number || 'Client';
+        }
+
+        const calendarClient = await getCalendarClient(googleAccount._id);
+        const start = meet_start_time ? new Date(meet_start_time) : new Date();
+        const end = meet_end_time ? new Date(meet_end_time) : new Date(start.getTime() + 60 * 60 * 1000);
+
+        const event = await calendarClient.events.insert({
+          calendarId: 'primary',
+          conferenceDataVersion: 1,
+          requestBody: {
+            summary: `Meeting with ${contactName}`,
+            description: 'Automated Google Meet link generated from CRM.',
+            start: { dateTime: start.toISOString() },
+            end: { dateTime: end.toISOString() },
+            conferenceData: {
+              createRequest: {
+                requestId: `meet-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+                conferenceSolutionKey: { type: 'hangoutsMeet' }
+              }
+            }
+          }
+        });
+
+        const meetLink = event.data.hangoutLink || (event.data.conferenceData && event.data.conferenceData.entryPoints?.find(e => e.entryPointType === 'video')?.uri);
+
+        if (!meetLink) {
+          return res.status(500).json({ success: false, error: 'Failed to generate Google Meet link from calendar event.' });
+        }
+
+        messageText = `Here is your Google Meet link:\n${meetLink}`;
+        messageType = 'text';
+
+      } catch (err) {
+        console.error('[Google Meet API Error]:', err);
+        return res.status(500).json({ success: false, error: 'Failed to create Google Meet link.', details: err.message });
+      }
+    }
 
     if (platformInput && ['telegram', 'facebook', 'instagram', 'twitter'].includes(platformInput) && !contactId && !whatsappPhoneNumberId) {
       const platform = platformInput;
@@ -498,10 +599,10 @@ export const sendMessage = async (req, res) => {
         text: msgText,
         file_url: fileUrlToPass,
         buttons: buttonParams || buttons,
-        latitude: location?.latitude,
-        longitude: location?.longitude,
-        name: location?.name,
-        address: location?.address
+        latitude: parsedLocation?.latitude,
+        longitude: parsedLocation?.longitude,
+        name: parsedLocation?.name,
+        address: parsedLocation?.address
       });
 
       const platformMessageId = sendResponse?.message_id || sendResponse?.result?.message_id;
@@ -516,7 +617,12 @@ export const sendMessage = async (req, res) => {
         recipient_id: resolvedRecipientId,
         direction: 'outbound',
         message_type: msgType,
-        content: msgText,
+        content: msgType === 'location' && parsedLocation ? JSON.stringify({
+          latitude: parsedLocation.latitude,
+          longitude: parsedLocation.longitude,
+          name: parsedLocation.name,
+          address: parsedLocation.address
+        }) : msgText,
         file_url: fileUrlToPass,
         from_me: true,
         delivery_status: 'delivered',
@@ -525,12 +631,20 @@ export const sendMessage = async (req, res) => {
         platform_message_id: platformMessageId ? platformMessageId.toString() : undefined
       });
 
+      if (contact) {
+        await Contact.updateOne(
+          { _id: contact._id },
+          { last_outgoing_message_at: new Date(), snooze_count: 0, is_snoozed: false }
+        );
+      }
+
       const io = req.app.get('io');
       if (io && contact) {
         const formattedMessage = {
           id: newMessage._id.toString(),
           wa_message_id: newMessage.platform_message_id || newMessage._id.toString(),
           content: newMessage.content,
+          interactiveData: newMessage.interactive_data || null,
           messageType: newMessage.message_type,
           fileUrl: newMessage.file_url || null,
           createdAt: newMessage.wa_timestamp,
@@ -565,6 +679,7 @@ export const sendMessage = async (req, res) => {
       const wNumber = await WhatsappPhoneNumber.findOne({
         $or: [
           { display_phone_number: whatsappPhoneNumberInput },
+          { display_phone_number: whatsappPhoneNumberInput.startsWith('+') ? whatsappPhoneNumberInput.slice(1) : `+${whatsappPhoneNumberInput}` },
           { phone_number_id: whatsappPhoneNumberInput }
         ],
         user_id: userId,
@@ -576,24 +691,56 @@ export const sendMessage = async (req, res) => {
     }
 
     if (!contactId && contactNoInput) {
-      const cleanedPhone = contactNoInput.replace(/[\s\-()\+]/g, '');
-      if (!/^\d{6,15}$/.test(cleanedPhone)) {
-        return res.status(400).json({
-          success: false,
-          error: 'Contact phone number must be 6-15 digits'
-        });
+      const isBsuid = /^[A-Z]{2}\.\d+$/.test(contactNoInput.trim());
+      const isPhone = !isBsuid && /^\+?\d+$/.test(contactNoInput.replace(/[\s\-()]/g, ''));
+      let cleanedPhone = null;
+      let usernameInput = null;
+      let bsuidInput = null;
+
+      if (isBsuid) {
+        bsuidInput = contactNoInput.trim();
+      } else if (isPhone) {
+        cleanedPhone = contactNoInput.replace(/[\s\-()\+]/g, '');
+        if (!/^\d{6,15}$/.test(cleanedPhone)) {
+          return res.status(400).json({
+            success: false,
+            error: 'Contact phone number must be 6-15 digits'
+          });
+        }
+      } else {
+        usernameInput = contactNoInput.trim();
+        if (!/^[a-zA-Z0-9_.-]{3,30}$/.test(usernameInput)) {
+          return res.status(400).json({
+            success: false,
+            error: 'Invalid WhatsApp username format'
+          });
+        }
       }
 
+      const query = { user_id: userId };
+      if (cleanedPhone) {
+        query.phone_number = cleanedPhone;
+      } else if (bsuidInput) {
+        query.whatsapp_bsuid = bsuidInput;
+      } else {
+        query.whatsapp_username = usernameInput;
+      }
+
+      const setOnInsert = {
+        name: contactNoInput,
+        user_id: userId,
+        created_by: userId,
+        status: 'lead',
+        source: 'whatsapp'
+      };
+      if (cleanedPhone) setOnInsert.phone_number = cleanedPhone;
+      if (bsuidInput) setOnInsert.whatsapp_bsuid = bsuidInput;
+      if (usernameInput) setOnInsert.whatsapp_username = usernameInput;
+
       let contact = await Contact.findOneAndUpdate(
-        { phone_number: cleanedPhone, user_id: userId },
+        query,
         {
-          $setOnInsert: {
-            phone_number: cleanedPhone,
-            name: contactNoInput,
-            user_id: userId,
-            created_by: userId,
-            status: 'lead'
-          },
+          $setOnInsert: setOnInsert,
           $set: { deleted_at: null }
         },
         { new: true, upsert: true }
@@ -612,7 +759,7 @@ export const sendMessage = async (req, res) => {
       try {
         const platform = contactDoc.source;
 
-        const allowedTypes = ['text', 'image', 'video', 'document', 'audio', 'file', 'location', 'link', 'interactive', 'template', 'reaction'];
+        const allowedTypes = ['text', 'image', 'video', 'document', 'audio', 'file', 'location', 'link', 'interactive', 'template', 'reaction', 'payment_link'];
         let msgType = messageType || 'text';
         if (!allowedTypes.includes(msgType)) {
           return res.status(400).json({
@@ -621,7 +768,51 @@ export const sendMessage = async (req, res) => {
           });
         }
 
-        if (msgType === 'template') {
+        const isTemplate = msgType === 'template';
+        if (isTemplate) {
+          msgType = 'text';
+        }
+
+        let templateObj = null;
+        if (isTemplate && templateIdInput) {
+          try {
+            templateObj = await Template.findById(templateIdInput).lean();
+          } catch (err) {
+            console.error('Error fetching template in sendMessage:', err);
+          }
+        }
+
+        let paymentResult = null;
+        if (msgType === 'payment_link') {
+          if (!amount || amount <= 0) {
+            return res.status(400).json({ success: false, error: 'Valid amount is required for payment_link' });
+          }
+          paymentResult = await paymentLinkService.sendPaymentLink({
+            context: 'custom',
+            context_id: new mongoose.Types.ObjectId(),
+            user_id: userId,
+            contact_id: contactDoc._id,
+            amount,
+            currency: currency || 'INR',
+            description: description || 'Payment for service',
+            whatsapp_phone_number_id: whatsappPhoneNumberIdInput,
+            gateway_config_id: gateway_id,
+            skip_message: true,
+            metadata: {
+              description: description || 'Payment for service',
+              contact_id: contactDoc._id
+            }
+          });
+
+          const amountDisplay = (amount / 100).toFixed(2);
+          messageText =
+            `💳 *Payment Required*\n\n` +
+            `*Description:* ${description || 'Payment for service'}\n` +
+            `*Amount:* ${currency || 'INR'} ${amountDisplay}\n\n` +
+            `Please complete your payment using the link below:\n` +
+            `${paymentResult.payment_link}\n\n` +
+            `_This link is secure and unique to you._`;
+
           msgType = 'text';
         }
 
@@ -651,103 +842,56 @@ export const sendMessage = async (req, res) => {
           }
         }
 
-        let fileUrlToPass = null;
-        let dbFileUrl = null;
-        if (uploadedFile) {
-          if (uploadedFile.buffer) {
-            try {
-              const { saveBufferLocally } = await import('../utils/whatsapp-message-handler.js');
-              const localPath = await saveBufferLocally(uploadedFile.buffer, uploadedFile.mimetype, msgType, userId);
-              fileUrlToPass = localPath;
-              dbFileUrl = localPath;
-            } catch (saveErr) {
-              console.error('[Omnichannel Controller] Error saving uploaded file buffer:', saveErr);
-              fileUrlToPass = uploadedFile;
-              dbFileUrl = uploadedFile.path || uploadedFile.originalname;
-            }
-          } else {
-            fileUrlToPass = uploadedFile.path || uploadedFile;
-            dbFileUrl = uploadedFile.path || uploadedFile.originalname;
-          }
-        } else if (mediaUrls && mediaUrls.length > 0) {
-          fileUrlToPass = mediaUrls[0];
-          dbFileUrl = mediaUrls[0];
-        } else {
-          fileUrlToPass = mediaUrl;
-          dbFileUrl = mediaUrl;
+        let mediaItems = [];
+        if (uploadedFiles && uploadedFiles.length > 0) {
+          uploadedFiles.forEach(file => {
+            const mimeType = file.mimetype || '';
+            let type = 'file';
+            if (mimeType.startsWith('image/')) type = 'image';
+            else if (mimeType.startsWith('video/')) type = 'video';
+            else if (mimeType.startsWith('audio/')) type = 'audio';
+            else type = 'document';
+            mediaItems.push({ file, type, isUrl: false });
+          });
+        }
+        if (parsedMediaUrls && parsedMediaUrls.length > 0) {
+          parsedMediaUrls.forEach(url => {
+            let type = 'file';
+            const lowerUrl = url.toLowerCase();
+            if (lowerUrl.match(/\.(jpg|jpeg|png|gif|webp|bmp|tiff|svg)(\?.*)?$/i)) type = 'image';
+            else if (lowerUrl.match(/\.(mp4|avi|mov|wmv|flv|webm|mkv)(\?.*)?$/i)) type = 'video';
+            else if (lowerUrl.match(/\.(mp3|wav|ogg|flac|aac|m4a|wma)(\?.*)?$/i)) type = 'audio';
+            else type = 'document';
+            mediaItems.push({ file: url, type, isUrl: true });
+          });
         }
 
-        if (dbFileUrl && typeof dbFileUrl === 'string' && dbFileUrl.startsWith('http')) {
-          try {
-            const urlObj = new URL(dbFileUrl);
-            dbFileUrl = urlObj.pathname.replace(/^\//, '');
-          } catch (_) { }
+        if (mediaItems.length === 0) {
+          mediaItems.push({ file: null, type: msgType, isUrl: false });
         }
 
         const { default: omnichannelService } = await import('../services/messaging/omnichannel.service.js');
         const { default: FacebookPage } = await import('../models/facebook-page.model.js');
 
-        let buttonsToPass = buttonParams || buttons;
-        let messageTextToPass = messageText;
-
-        if (msgType === 'interactive' && interactiveType === 'list' && listParams) {
-          const listItems = listParams.items || [];
-          buttonsToPass = listItems.map(item => ({
-            id: item.id || item.title,
-            text: item.title
-          }));
-          if (!messageTextToPass) {
-            messageTextToPass = listParams.body || listParams.header || "Please select an option:";
-          }
-        }
+        let connection = null;
+        workspaceId = contactDoc.workspace_id;
+        senderId = null;
+        let pageId = null;
+        let reply_to_comment_id = undefined;
 
         if (platform === 'telegram') {
           const { default: TelegramConnection } = await import('../models/telegram-connection.model.js');
-          const bot = await TelegramConnection.findOne({ $or: [{ workspace_id: workspaceId }, { user_id: contactDoc.user_id }], is_active: true });
-          if (!bot) return res.status(400).json({ success: false, error: 'No active Telegram bot found for this contact' });
-          senderId = bot.bot_id;
-
-          const sendResponse = await omnichannelService.sendMessage({
-            platform,
-            workspace_id: bot.workspace_id,
-            user_id: contactDoc.user_id,
-            recipient_id: contactDoc.telegram_chat_id,
-            message_type: msgType,
-            text: messageTextToPass,
-            file_url: fileUrlToPass,
-            buttons: buttonsToPass,
-            latitude: location?.latitude,
-            longitude: location?.longitude,
-            name: location?.name,
-            address: location?.address,
-            reaction_message_id: reactionMessageId,
-            reaction_emoji: reactionEmoji
-          });
-          if (sendResponse) {
-            platformMessageId = sendResponse.message_id || sendResponse.result?.message_id;
-          }
+          connection = await TelegramConnection.findOne({ $or: [{ workspace_id: workspaceId }, { user_id: contactDoc.user_id }], is_active: true });
+          if (!connection) return res.status(400).json({ success: false, error: 'No active Telegram bot found for this contact' });
+          senderId = connection.bot_id;
+          workspaceId = connection.workspace_id;
         } else if (platform === 'twitter') {
           const { default: TwitterConnection } = await import('../models/twitter-connection.model.js');
-          const twConn = await TwitterConnection.findOne({ $or: [{ workspace_id: workspaceId }, { user_id: contactDoc.user_id }], is_active: true }).lean();
-          if (!twConn) return res.status(400).json({ success: false, error: 'No active Twitter connection found' });
-          if (!twConn.access_token) return res.status(400).json({ success: false, error: 'Twitter access token not found' });
-          workspaceId = workspaceId || twConn.workspace_id;
-
-          const sendResponse = await omnichannelService.sendMessage({
-            platform,
-            workspace_id: workspaceId,
-            user_id: contactDoc.user_id,
-            recipient_id: contactDoc.twitter_user_id || req.body.recipient_id,
-            message_type: msgType,
-            text: messageTextToPass,
-            file_url: fileUrlToPass,
-            buttons: buttonsToPass
-          });
-          if (sendResponse) {
-            platformMessageId = sendResponse.message_id || sendResponse.result?.message_id;
-          }
+          connection = await TwitterConnection.findOne({ $or: [{ workspace_id: workspaceId }, { user_id: contactDoc.user_id }], is_active: true }).lean();
+          if (!connection) return res.status(400).json({ success: false, error: 'No active Twitter connection found' });
+          if (!connection.access_token) return res.status(400).json({ success: false, error: 'Twitter access token not found' });
+          workspaceId = workspaceId || connection.workspace_id;
         } else {
-          let connection = null;
           if (platform === 'facebook') {
             const { default: FacebookConnection } = await import('../models/facebook-connection.model.js');
             connection = await FacebookConnection.findOne({ $or: [{ workspace_id: workspaceId }, { user_id: contactDoc.user_id }], is_active: true }).lean();
@@ -759,8 +903,6 @@ export const sendMessage = async (req, res) => {
           if (!connection) return res.status(400).json({ success: false, error: `No active ${platform} connection for this workspace` });
           workspaceId = workspaceId || connection.workspace_id;
 
-          let pageId = null;
-          let reply_to_comment_id = undefined;
           const lastMsg = await Message.findOne({ contact_id: contactDoc._id }).sort({ wa_timestamp: -1 }).lean();
           if (lastMsg) {
             pageId = lastMsg.direction === 'inbound' ? lastMsg.recipient_id : lastMsg.sender_id;
@@ -789,111 +931,261 @@ export const sendMessage = async (req, res) => {
               senderId = pageId;
             }
           }
+        }
 
-          const sendResponse = await omnichannelService.sendMessage({
-            platform,
+        let lastMessage = null;
+
+        for (let i = 0; i < mediaItems.length; i++) {
+          const mediaItem = mediaItems[i];
+          const currentMsgType = mediaItem.file ? mediaItem.type : msgType;
+          let platformMessageId = null;
+
+          let fileUrlToPass = null;
+          let dbFileUrl = null;
+          if (mediaItem.file && !mediaItem.isUrl) {
+            const fileObj = mediaItem.file;
+            if (fileObj.buffer) {
+              try {
+                const { saveBufferLocally, convertAudioForMeta } = await import('../utils/whatsapp-message-handler.js');
+                let localPath = await saveBufferLocally(fileObj.buffer, fileObj.mimetype, currentMsgType, userId);
+
+                if (currentMsgType === 'audio' && ['facebook', 'instagram'].includes(platform)) {
+                  localPath = await convertAudioForMeta(localPath);
+                }
+
+                fileUrlToPass = localPath;
+                dbFileUrl = localPath;
+              } catch (saveErr) {
+                console.error('[Omnichannel Controller] Error saving uploaded file buffer:', saveErr);
+                fileUrlToPass = fileObj;
+                dbFileUrl = fileObj.path || fileObj.originalname;
+              }
+            } else {
+              let localPath = fileObj.path || fileObj;
+              if (currentMsgType === 'audio' && ['facebook', 'instagram'].includes(platform) && typeof localPath === 'string') {
+                const { convertAudioForMeta } = await import('../utils/whatsapp-message-handler.js');
+                localPath = await convertAudioForMeta(localPath);
+              }
+              fileUrlToPass = localPath;
+              dbFileUrl = localPath;
+            }
+          } else if (mediaItem.file && mediaItem.isUrl) {
+            fileUrlToPass = mediaItem.file;
+            dbFileUrl = mediaItem.file;
+          }
+
+
+
+          let buttonsToPass = buttons || buttonParams;
+          if (buttonsToPass && !Array.isArray(buttonsToPass)) {
+            buttonsToPass = [buttonsToPass];
+          }
+          let messageTextToPass = messageText;
+
+          if (mediaItems.length > 1) {
+            messageTextToPass = messageText ? `${messageText} (${i + 1}/${mediaItems.length})` : '';
+            if (i > 0) buttonsToPass = undefined;
+          }
+
+          if (currentMsgType === 'interactive' && interactiveType === 'list' && listParams) {
+            const listItems = listParams.items || [];
+            buttonsToPass = listItems.map(item => ({
+              id: item.id || item.title,
+              text: item.title
+            }));
+            if (!messageTextToPass) {
+              messageTextToPass = listParams.body || listParams.header || "Please select an option:";
+            }
+          }
+
+          let currentReplyToCommentId = i === 0 ? reply_to_comment_id : undefined;
+
+          if (platform === 'telegram') {
+            const sendResponse = await omnichannelService.sendMessage({
+              platform,
+              workspace_id: workspaceId,
+              user_id: contactDoc.user_id,
+              recipient_id: contactDoc.telegram_chat_id,
+              message_type: currentMsgType,
+              text: messageTextToPass,
+              file_url: fileUrlToPass,
+              buttons: buttonsToPass,
+              latitude: parsedLocation?.latitude,
+              longitude: parsedLocation?.longitude,
+              name: parsedLocation?.name,
+              address: parsedLocation?.address,
+              reaction_message_id: reactionMessageId,
+              reaction_emoji: reactionEmoji
+            });
+            if (sendResponse) {
+              platformMessageId = sendResponse.message_id || sendResponse.result?.message_id;
+            }
+          } else if (platform === 'twitter') {
+            const sendResponse = await omnichannelService.sendMessage({
+              platform,
+              workspace_id: workspaceId,
+              user_id: contactDoc.user_id,
+              recipient_id: contactDoc.twitter_user_id || req.body.recipient_id,
+              message_type: currentMsgType,
+              text: messageTextToPass,
+              file_url: fileUrlToPass,
+              buttons: buttonsToPass
+            });
+            if (sendResponse) {
+              platformMessageId = sendResponse.message_id || sendResponse.result?.message_id;
+            }
+          } else {
+            const sendResponse = await omnichannelService.sendMessage({
+              platform,
+              workspace_id: workspaceId,
+              user_id: contactDoc.user_id,
+              page_id: pageId,
+              recipient_id: platform === 'facebook' ? contactDoc.facebook_page_scoped_id : contactDoc.instagram_scoped_id,
+              message_type: currentMsgType,
+              text: messageTextToPass,
+              file_url: fileUrlToPass,
+              buttons: buttonsToPass,
+              latitude: parsedLocation?.latitude,
+              longitude: parsedLocation?.longitude,
+              name: parsedLocation?.name,
+              address: parsedLocation?.address,
+              reaction_message_id: finalReactionMessageId,
+              reaction_emoji: reactionEmoji,
+              reply_to_comment_id: currentReplyToCommentId
+            });
+
+            if (sendResponse) {
+              platformMessageId = sendResponse.message_id || sendResponse.result?.message_id;
+            }
+          }
+
+          const interactiveDataToSave = currentMsgType === 'interactive'
+            ? {
+              interactiveType,
+              buttons: (interactiveType === 'button' || interactiveType === 'cta_url') ? (buttonParams || buttons) : undefined,
+              list: interactiveType === 'list' ? listParams : undefined
+            }
+            : null;
+
+          const newMessage = await Message.create({
             workspace_id: workspaceId,
-            user_id: contactDoc.user_id,
-            page_id: pageId,
-            recipient_id: platform === 'facebook' ? contactDoc.facebook_page_scoped_id : contactDoc.instagram_scoped_id,
-            message_type: msgType,
-            text: messageTextToPass,
-            file_url: fileUrlToPass,
-            buttons: buttonsToPass,
-            latitude: location?.latitude,
-            longitude: location?.longitude,
-            name: location?.name,
-            address: location?.address,
+            user_id: userId,
+            contact_id: contactDoc._id,
+            platform: platform,
+            provider: platform,
+            sender_id: senderId,
+            recipient_id: platform === 'telegram' ? contactDoc.telegram_chat_id : (platform === 'facebook' ? contactDoc.facebook_page_scoped_id : contactDoc.instagram_scoped_id),
+            direction: 'outbound',
+            message_type: isTemplate ? 'template' : currentMsgType,
+            template_id: isTemplate ? (templateIdInput || undefined) : undefined,
+            content: currentMsgType === 'location' && parsedLocation ? JSON.stringify({
+              latitude: parsedLocation.latitude,
+              longitude: parsedLocation.longitude,
+              name: parsedLocation.name,
+              address: parsedLocation.address
+            }) : messageTextToPass,
+            file_url: dbFileUrl,
+            interactive_data: interactiveDataToSave,
+            from_me: true,
+            delivery_status: 'delivered',
+            read_status: 'unread',
+            wa_timestamp: new Date(),
+            reply_message_id: finalReplyMessageId,
             reaction_message_id: finalReactionMessageId,
             reaction_emoji: reactionEmoji,
-            reply_to_comment_id: reply_to_comment_id
+            platform_message_id: platformMessageId ? platformMessageId.toString() : undefined
           });
 
-          if (sendResponse) {
-            console.log("sendResponse for omnichannel:", JSON.stringify(sendResponse));
-            platformMessageId = sendResponse.message_id || sendResponse.result?.message_id;
-            console.log("extracted platformMessageId:", platformMessageId);
+          lastMessage = newMessage;
+
+          contactDoc.last_outgoing_message_at = new Date();
+          contactDoc.snooze_count = 0;
+          contactDoc.is_snoozed = false;
+          await contactDoc.save();
+
+          const io = req.app.get('io');
+          if (io) {
+            const formattedMessage = {
+              id: newMessage._id.toString(),
+              wa_message_id: newMessage.platform_message_id || newMessage.wa_message_id || newMessage._id.toString(),
+              reaction_message_id: newMessage.reaction_message_id || undefined,
+              reaction_emoji: newMessage.reaction_emoji || undefined,
+              content: newMessage.content,
+              interactiveData: newMessage.interactive_data || null,
+              messageType: newMessage.message_type,
+              fileUrl: newMessage.file_url || null,
+              template: templateObj || null,
+              createdAt: newMessage.wa_timestamp,
+              can_chat: true,
+              delivered_at: new Date(),
+              delivery_status: newMessage.delivery_status || 'delivered',
+              direction: newMessage.direction || 'outbound',
+              sender: {
+                id: senderId,
+                name: 'Agent'
+              },
+              recipient: {
+                id: platform === 'telegram' ? contactDoc.telegram_chat_id : (platform === 'facebook' ? contactDoc.facebook_page_scoped_id : contactDoc.instagram_scoped_id),
+                name: contactDoc.name
+              },
+              user_id: newMessage.user_id?.toString(),
+              contact_id: contactDoc._id.toString(),
+              platform: platform,
+              provider: platform
+            };
+            io.emit('whatsapp:message', formattedMessage);
           }
         }
 
-        const interactiveDataToSave = msgType === 'interactive'
-          ? {
-            interactiveType,
-            buttons: interactiveType === 'button' ? buttonParams : undefined,
-            list: interactiveType === 'list' ? listParams : undefined
-          }
-          : null;
-
-        const newMessage = await Message.create({
-          workspace_id: workspaceId,
-          user_id: userId,
-          contact_id: contactDoc._id,
-          platform: platform,
-          provider: platform,
-          sender_id: senderId,
-          recipient_id: platform === 'telegram' ? contactDoc.telegram_chat_id : (platform === 'facebook' ? contactDoc.facebook_page_scoped_id : contactDoc.instagram_scoped_id),
-          direction: 'outbound',
-          message_type: msgType,
-          content: messageTextToPass,
-          file_url: dbFileUrl,
-          interactive_data: interactiveDataToSave,
-          from_me: true,
-          delivery_status: 'delivered',
-          read_status: 'unread',
-          wa_timestamp: new Date(),
-          reply_message_id: finalReplyMessageId,
-          reaction_message_id: finalReactionMessageId,
-          reaction_emoji: reactionEmoji,
-          platform_message_id: platformMessageId ? platformMessageId.toString() : undefined
-        });
-
-        const io = req.app.get('io');
-        if (io) {
-          const formattedMessage = {
-            id: newMessage._id.toString(),
-            wa_message_id: newMessage.platform_message_id || newMessage.wa_message_id || newMessage._id.toString(),
-            reaction_message_id: newMessage.reaction_message_id || undefined,
-            reaction_emoji: newMessage.reaction_emoji || undefined,
-            content: newMessage.content,
-            interactiveData: newMessage.interactive_data || null,
-            messageType: newMessage.message_type,
-            fileUrl: newMessage.file_url || null,
-            createdAt: newMessage.wa_timestamp,
-            can_chat: true,
-            delivered_at: new Date(),
-            delivery_status: newMessage.delivery_status || 'delivered',
-            direction: newMessage.direction || 'outbound',
-            sender: {
-              id: senderId,
-              name: 'Agent'
-            },
-            recipient: {
-              id: platform === 'telegram' ? contactDoc.telegram_chat_id : (platform === 'facebook' ? contactDoc.facebook_page_scoped_id : contactDoc.instagram_scoped_id),
-              name: contactDoc.name
-            },
-            user_id: newMessage.user_id?.toString(),
-            contact_id: contactDoc._id.toString(),
-            platform: platform,
-            provider: platform
+        let responseData = lastMessage;
+        if (paymentResult) {
+          responseData = {
+            ...lastMessage.toObject(),
+            payment_link: paymentResult.payment_link,
+            transaction_id: paymentResult.transaction._id
           };
-          io.emit('whatsapp:message', formattedMessage);
         }
 
         return res.status(200).json({
           success: true,
-          message: 'Message sent successfully',
-          data: newMessage
+          message: paymentResult ? 'Payment link sent successfully' : (mediaItems.length > 1 ? `Successfully sent ${mediaItems.length} messages` : 'Message sent successfully'),
+          data: responseData
         });
       } catch (err) {
         console.error(`Error sending ${contactDoc.source} message:`, err);
-        const errorMsg = err.response?.data?.error?.message || err.response?.data?.description || err.message || 'Failed to send omnichannel message';
-        return res.status(500).json({ success: false, error: `Omnichannel Error: ${errorMsg}` });
+        let errorMessage = err.message || 'Failed to send omnichannel message';
+
+        if (err.response?.data?.error) {
+          const metaError = err.response.data.error;
+          errorMessage = metaError.error_user_msg || metaError.message || errorMessage;
+        } else if (err.response?.data?.message) {
+          errorMessage = err.response.data.message;
+        } else if (err.error && err.error.description) {
+          errorMessage = err.error.description;
+        }
+
+        return res.status(500).json({ success: false, error: errorMessage, details: errorMessage });
       }
     }
 
     if (!whatsappPhoneNumberId && connectionId && provider === PROVIDER_TYPES.BAILEY) {
       const phone = await WhatsappPhoneNumber.findOne({ waba_id: connectionId, deleted_at: null }).lean();
       if (phone) whatsappPhoneNumberId = phone._id.toString();
+    }
+
+    if (whatsappPhoneNumberId) {
+      const phone = await WhatsappPhoneNumber.findById(whatsappPhoneNumberId).lean();
+      if (!phone) {
+        const phoneByWaba = await WhatsappPhoneNumber.findOne({ waba_id: whatsappPhoneNumberId, deleted_at: null }).lean();
+        if (phoneByWaba) {
+          whatsappPhoneNumberId = phoneByWaba._id.toString();
+        } else {
+          return res.status(400).json({
+            success: false,
+            error: `Invalid whatsapp_phone_number_id provided (${whatsappPhoneNumberId}). This ID does not match any registered WhatsApp phone number or connection.`
+          });
+        }
+      }
     }
 
     if (!contactId || !whatsappPhoneNumberId) {
@@ -919,7 +1211,8 @@ export const sendMessage = async (req, res) => {
       whatsappPhoneNumber = allowed;
     }
 
-    if (mediaUrls && Array.isArray(mediaUrls) && mediaUrls.length > 1) {
+
+    if (totalMediaCount > 1) {
       const contact = await Contact.findById(contactId);
       return await sendMultipleMediaUrls({
         userId: senderId,
@@ -970,7 +1263,7 @@ export const sendMessage = async (req, res) => {
       file: uploadedFile,
       messageType,
       interactiveType,
-      buttonParams,
+      buttonParams: buttonParams || buttons,
       listParams,
       templateName,
       languageCode,
@@ -979,11 +1272,11 @@ export const sendMessage = async (req, res) => {
       providerType: provider,
       connectionId,
       mediaUrl: uploadedFile ? uploadedFile.path : ((mediaUrls && mediaUrls.length === 1) ? mediaUrls[0] : mediaUrl),
-      locationParams: messageType === 'location' && location ? {
-        latitude: location.latitude,
-        longitude: location.longitude,
-        name: location.name || undefined,
-        address: location.address || undefined
+      locationParams: messageType === 'location' && parsedLocation ? {
+        latitude: parsedLocation.latitude,
+        longitude: parsedLocation.longitude,
+        name: parsedLocation.name || undefined,
+        address: parsedLocation.address || undefined
       } : undefined,
       replyMessageId,
       reactionMessageId,
@@ -1029,6 +1322,8 @@ export const sendMessage = async (req, res) => {
       wa_timestamp: savedMessage.wa_timestamp,
       is_delivered: savedMessage.is_delivered,
       is_seen: savedMessage.is_seen,
+      delivery_status: savedMessage.delivery_status || 'sent',
+      wa_status: savedMessage.wa_status || 'sent',
       provider: savedMessage.provider,
       reply_message_id: savedMessage.reply_message_id,
       reaction_message_id: savedMessage.reaction_message_id,
@@ -1043,10 +1338,17 @@ export const sendMessage = async (req, res) => {
     });
   } catch (error) {
     console.error('Error sending message:', error);
+    let errorDetails = error.message;
+    if (error.response?.data?.error) {
+      const metaError = error.response.data.error;
+      errorDetails = metaError.error_user_msg || metaError.message || errorDetails;
+    } else if (error.response?.data?.message) {
+      errorDetails = error.response.data.message;
+    }
     return res.status(500).json({
       success: false,
-      error: 'Failed to send message',
-      details: error.message
+      error: errorDetails || 'Failed to send message',
+      details: errorDetails
     });
   }
 };
@@ -1069,29 +1371,51 @@ export const getContactProfile = async (req, res) => {
       });
     }
 
+    const contact = await Contact.findById(contactId)
+      .populate('assigned_call_agent_id', 'name')
+      .populate('assigned_chatbot', 'name');
+    if (!contact) {
+      return res.status(404).json({
+        success: false,
+        error: 'Contact not found'
+      });
+    }
+
     let resolvedWhatsappPhoneNumberId = whatsappPhoneNumberId;
     if (!resolvedWhatsappPhoneNumberId) {
-      const primaryPhoneNumber = await WhatsappPhoneNumber.findOne({
-        user_id: userId,
-        is_primary: true,
-        is_active: true,
-        deleted_at: null
-      }).lean();
+      const lastMsg = await Message.findOne({ contact_id: contactId }).sort({ created_at: -1 }).lean();
+      if (lastMsg) {
+        if (['facebook', 'instagram', 'telegram'].includes(lastMsg.platform)) {
+          const contactIdentifier = contact.phone_number || contact.telegram_chat_id || contact.instagram_scoped_id || contact.facebook_page_scoped_id;
+          resolvedWhatsappPhoneNumberId = (lastMsg.sender_id === contactIdentifier || lastMsg.sender_number === contactIdentifier) ? (lastMsg.recipient_id || lastMsg.recipient_number) : (lastMsg.sender_id || lastMsg.sender_number);
+        } else if (lastMsg.whatsapp_phone_number_id) {
+          resolvedWhatsappPhoneNumberId = lastMsg.whatsapp_phone_number_id.toString();
+        }
+      }
 
-      if (primaryPhoneNumber) {
-        resolvedWhatsappPhoneNumberId = primaryPhoneNumber._id.toString();
-      } else {
-        const tg = await TelegramConnection.findOne({ user_id: userId, is_active: true }).lean();
-        if (tg) {
-          resolvedWhatsappPhoneNumberId = tg._id.toString();
+      if (!resolvedWhatsappPhoneNumberId) {
+        const primaryPhoneNumber = await WhatsappPhoneNumber.findOne({
+          user_id: userId,
+          is_primary: true,
+          is_active: true,
+          deleted_at: null
+        }).lean();
+
+        if (primaryPhoneNumber) {
+          resolvedWhatsappPhoneNumberId = primaryPhoneNumber._id.toString();
         } else {
-          const ig = await InstagramConnection.findOne({ user_id: userId, is_active: true }).lean();
-          if (ig) {
-            resolvedWhatsappPhoneNumberId = ig._id.toString();
+          const tg = await TelegramConnection.findOne({ user_id: userId, is_active: true }).lean();
+          if (tg) {
+            resolvedWhatsappPhoneNumberId = tg._id.toString();
           } else {
-            const fb = await FacebookConnection.findOne({ user_id: userId, is_active: true }).lean();
-            if (fb) {
-              resolvedWhatsappPhoneNumberId = fb._id.toString();
+            const ig = await InstagramConnection.findOne({ user_id: userId, is_active: true }).lean();
+            if (ig) {
+              resolvedWhatsappPhoneNumberId = ig._id.toString();
+            } else {
+              const fb = await FacebookConnection.findOne({ user_id: userId, is_active: true }).lean();
+              if (fb) {
+                resolvedWhatsappPhoneNumberId = fb._id.toString();
+              }
             }
           }
         }
@@ -1103,14 +1427,6 @@ export const getContactProfile = async (req, res) => {
           error: 'No active connection found.'
         });
       }
-    }
-
-    const contact = await Contact.findById(contactId).populate('assigned_call_agent_id', 'name');
-    if (!contact) {
-      return res.status(404).json({
-        success: false,
-        error: 'Contact not found'
-      });
     }
 
     let isTelegram = false;
@@ -1139,7 +1455,7 @@ export const getContactProfile = async (req, res) => {
       if (tg) {
         isTelegram = true;
         activeConnection = tg;
-        myPhoneNumber = tg.bot_username || tg.bot_id;
+        myPhoneNumber = tg.bot_id;
       } else {
         const ig = await InstagramConnection.findOne({
           $or: [
@@ -1152,7 +1468,7 @@ export const getContactProfile = async (req, res) => {
           isInstagram = true;
           activeConnection = ig;
           const page = (ig.pages || []).find(p => p.instagram_account_id === resolvedWhatsappPhoneNumberId || ig._id.toString() === resolvedWhatsappPhoneNumberId);
-          myPhoneNumber = page ? page.instagram_username : ig.username;
+          myPhoneNumber = page ? page.instagram_account_id : ig.ig_user_id;
         } else {
           const fb = await FacebookConnection.findOne({
             $or: [
@@ -1165,7 +1481,7 @@ export const getContactProfile = async (req, res) => {
             isFacebook = true;
             activeConnection = fb;
             const page = (fb.pages || []).find(p => p.page_id === resolvedWhatsappPhoneNumberId || fb._id.toString() === resolvedWhatsappPhoneNumberId);
-            myPhoneNumber = page ? page.page_name : fb.name;
+            myPhoneNumber = page ? page.page_id : fb.fb_user_id;
           }
         }
       }
@@ -1194,7 +1510,7 @@ export const getContactProfile = async (req, res) => {
     let allMessages = await Message.find({
       contact_id: contact._id,
       deleted_at: null,
-      message_type: { $in: ['image', 'audio', 'video', 'document'] }
+      message_type: { $in: ['image', 'audio', 'video', 'document', 'location'] }
     }).lean();
 
     const contactIdentifier = contact.phone_number || contact.telegram_chat_id || contact.instagram_scoped_id || contact.facebook_page_scoped_id;
@@ -1209,7 +1525,7 @@ export const getContactProfile = async (req, res) => {
         ],
         user_id: userId,
         deleted_at: null,
-        message_type: { $in: ['image', 'audio', 'video', 'document'] }
+        message_type: { $in: ['image', 'audio', 'video', 'document', 'location'] }
       }).lean();
     }
 
@@ -1222,7 +1538,7 @@ export const getContactProfile = async (req, res) => {
           { sender_id: myPhoneNumber, recipient_id: contactIdentifier }
         ],
         deleted_at: null,
-        message_type: { $in: ['image', 'audio', 'video', 'document'] }
+        message_type: { $in: ['image', 'audio', 'video', 'document', 'location'] }
       }).lean();
       console.log('Found media messages without user_id filter:', allMessages.length);
     }
@@ -1239,7 +1555,7 @@ export const getContactProfile = async (req, res) => {
       }).lean();
 
       allMessages = allConversationMessages.filter(msg =>
-        ['image', 'video', 'audio', 'document'].includes(msg.message_type)
+        ['image', 'video', 'audio', 'document', 'location'].includes(msg.message_type)
       );
       console.log('Found media messages by filtering conversation:', allMessages.length);
     }
@@ -1275,6 +1591,7 @@ export const getContactProfile = async (req, res) => {
       }
 
       const assignment = await ChatAssignment.findOne(assignmentQuery)
+        .sort({ created_at: -1 })
         .populate('agent_id', 'name email phone')
         .lean();
 
@@ -1299,6 +1616,8 @@ export const getContactProfile = async (req, res) => {
         _id: contact._id.toString(),
         name: contact.name,
         phone_number: displayName,
+        whatsapp_username: contact.whatsapp_username || null,
+        whatsapp_bsuid: contact.whatsapp_bsuid || null,
         email: contact.email,
         status: contact.status,
         chat_status: contact.chat_status,
@@ -1313,7 +1632,8 @@ export const getContactProfile = async (req, res) => {
       })),
       media: mediaByWeeks,
       assigned_agent: assignedAgentId,
-      assigned_call_agent: contact.assigned_call_agent_id
+      assigned_call_agent: contact.assigned_call_agent_id,
+      assigned_chatbot: contact.assigned_chatbot
     });
   } catch (error) {
     console.error('Error retrieving contact profile:', error);
@@ -1331,21 +1651,35 @@ const groupMediaByWeeks = (messages) => {
     images: [],
     audios: [],
     videos: [],
-    documents: []
+    documents: [],
+    locations: []
   };
 
   const weekGroups = {};
 
   messages.forEach((message) => {
     const messageType = message.message_type || message.messageType;
-    if (['image', 'audio', 'video', 'document'].includes(messageType)) {
+    if (['image', 'audio', 'video', 'document', 'location'].includes(messageType)) {
+      let fileUrl = message.file_url || message.fileUrl || '';
+      if (messageType === 'location' && message.content) {
+        try {
+          const loc = typeof message.content === 'string' ? JSON.parse(message.content) : message.content;
+          if (loc && loc.latitude && loc.longitude) {
+            fileUrl = `https://www.google.com/maps?q=${loc.latitude},${loc.longitude}`;
+          }
+        } catch (e) {
+          console.error('[groupMediaByWeeks] Failed to parse location content:', e);
+        }
+      }
+
       const mediaPayload = {
         id: message._id.toString(),
         messageType: messageType,
-        fileUrl: message.file_url || message.fileUrl,
+        fileUrl: fileUrl,
         createdAt: message.wa_timestamp || message.createdAt || message.created_at,
         senderNumber: message.sender_number,
-        recipientNumber: message.recipient_number
+        recipientNumber: message.recipient_number,
+        metadata: message.metadata
       };
 
       const messageDate = new Date(message.wa_timestamp || message.createdAt || message.created_at);
@@ -1365,11 +1699,12 @@ const groupMediaByWeeks = (messages) => {
           images: [],
           audios: [],
           videos: [],
-          documents: []
+          documents: [],
+          locations: []
         };
       }
 
-      switch (message.message_type) {
+      switch (messageType) {
         case 'image':
           weekGroups[weekKey].images.push(mediaPayload);
           break;
@@ -1381,6 +1716,9 @@ const groupMediaByWeeks = (messages) => {
           break;
         case 'document':
           weekGroups[weekKey].documents.push(mediaPayload);
+          break;
+        case 'location':
+          weekGroups[weekKey].locations.push(mediaPayload);
           break;
       }
     }
@@ -1449,14 +1787,89 @@ export const getMessages = async (req, res) => {
       });
     }
 
+    // Mark inbound messages as read for this contact
+    const unreadMessages = await Message.find({
+      contact_id: contact._id,
+      direction: 'inbound',
+      deleted_at: null,
+      $or: [
+        { is_seen: false },
+        { read_status: 'unread' }
+      ]
+    }).lean();
+
+    if (unreadMessages.length > 0) {
+      await Message.updateMany(
+        { _id: { $in: unreadMessages.map(m => m._id) } },
+        {
+          $set: {
+            is_seen: true,
+            seen_at: new Date(),
+            read_status: 'read'
+          }
+        }
+      );
+
+      const io = req.app.get('io');
+      if (io) {
+        unreadMessages.forEach(m => {
+          io.emit('whatsapp:status', {
+            id: m._id.toString(),
+            wa_message_id: m.wa_message_id,
+            is_seen: true,
+            seen_at: new Date(),
+            read_status: 'read',
+            direction: 'inbound',
+            sender: { id: m.sender_number, name: m.sender_number },
+            recipient: { id: m.recipient_number, name: m.recipient_number },
+            user_id: m.user_id?.toString(),
+            contact_id: m.contact_id?.toString(),
+            whatsapp_phone_number_id: m.whatsapp_connection_id?.toString() || whatsappPhoneNumberId
+          });
+        });
+      }
+    }
+
     if (contact.source && ['telegram', 'facebook', 'instagram'].includes(contact.source)) {
       let activeConnection = null;
-      if (contact.source === 'telegram') {
-        activeConnection = await TelegramConnection.findOne({ user_id: userId, is_active: true });
-      } else if (contact.source === 'instagram') {
-        activeConnection = await InstagramConnection.findOne({ user_id: userId, is_active: true });
-      } else if (contact.source === 'facebook') {
-        activeConnection = await FacebookConnection.findOne({ user_id: userId, is_active: true });
+      const connectionIdToUse = connection_id && connection_id !== 'null' && connection_id !== 'undefined' ? connection_id : whatsappPhoneNumberId;
+
+      if (connectionIdToUse && connectionIdToUse !== 'null' && connectionIdToUse !== 'undefined') {
+        const isObjectId = mongoose.Types.ObjectId.isValid(connectionIdToUse);
+        if (contact.source === 'telegram') {
+          activeConnection = await TelegramConnection.findOne({
+            $or: [
+              ...(isObjectId ? [{ _id: new mongoose.Types.ObjectId(connectionIdToUse) }] : []),
+              { bot_id: connectionIdToUse }
+            ]
+          });
+        } else if (contact.source === 'instagram') {
+          activeConnection = await InstagramConnection.findOne({
+            $or: [
+              ...(isObjectId ? [{ _id: new mongoose.Types.ObjectId(connectionIdToUse) }] : []),
+              { ig_user_id: connectionIdToUse },
+              { "pages.instagram_account_id": connectionIdToUse }
+            ]
+          });
+        } else if (contact.source === 'facebook') {
+          activeConnection = await FacebookConnection.findOne({
+            $or: [
+              ...(isObjectId ? [{ _id: new mongoose.Types.ObjectId(connectionIdToUse) }] : []),
+              { fb_user_id: connectionIdToUse },
+              { "pages.page_id": connectionIdToUse }
+            ]
+          });
+        }
+      }
+
+      if (!activeConnection) {
+        if (contact.source === 'telegram') {
+          activeConnection = await TelegramConnection.findOne({ user_id: userId, is_active: true });
+        } else if (contact.source === 'instagram') {
+          activeConnection = await InstagramConnection.findOne({ user_id: userId, is_active: true });
+        } else if (contact.source === 'facebook') {
+          activeConnection = await FacebookConnection.findOne({ user_id: userId, is_active: true });
+        }
       }
 
       const startDate = parseDate(start_date);
@@ -1475,6 +1888,27 @@ export const getMessages = async (req, res) => {
         contact_id: contact._id,
         deleted_at: null
       };
+
+      if (activeConnection) {
+        let platformIds = [];
+        if (contact.source === 'telegram') {
+          if (activeConnection.bot_id) platformIds.push(activeConnection.bot_id);
+        } else if (contact.source === 'facebook') {
+          if (activeConnection.pages) {
+            platformIds.push(...activeConnection.pages.map(p => p.page_id).filter(Boolean));
+          }
+        } else if (contact.source === 'instagram') {
+          if (activeConnection.ig_user_id) platformIds.push(activeConnection.ig_user_id);
+          if (activeConnection.global_instagram_account_id) platformIds.push(activeConnection.global_instagram_account_id);
+          if (activeConnection.pages) {
+            platformIds.push(...activeConnection.pages.map(p => p.instagram_account_id).filter(Boolean));
+          }
+        }
+
+        if (platformIds.length > 0) {
+          query.$or = [{ sender_id: { $in: platformIds } }, { recipient_id: { $in: platformIds } }];
+        }
+      }
 
       if (search && String(search).trim()) {
         query.content = { $regex: String(search).trim(), $options: 'i' };
@@ -1803,6 +2237,160 @@ export const togglePinChat = async (req, res) => {
   }
 };
 
+
+export const assignChatbot = async (req, res) => {
+  try {
+    const userId = req.user.owner_id;
+    const { contact_id, chatbot_id, chatbot_paused } = req.body;
+
+    if (!contact_id) {
+      return res.status(400).json({ success: false, error: 'contact_id is required' });
+    }
+
+    const contact = await Contact.findOne({
+      _id: contact_id,
+      created_by: userId,
+      deleted_at: null
+    });
+
+    if (!contact) {
+      return res.status(404).json({ success: false, error: 'Contact not found' });
+    }
+
+    if (chatbot_id !== undefined) {
+      contact.assigned_chatbot = chatbot_id || null;
+      if (chatbot_id) {
+        contact.chatbot_paused = false;
+        contact.ai_message_count = 0;
+      }
+    }
+
+    if (chatbot_paused !== undefined) {
+      contact.chatbot_paused = chatbot_paused;
+      if (chatbot_paused === false) {
+        contact.ai_message_count = 0;
+      }
+    }
+
+    await contact.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'AI Agent assignment updated successfully',
+      data: {
+        contact_id: contact._id,
+        assigned_chatbot: contact.assigned_chatbot,
+        chatbot_paused: contact.chatbot_paused
+      }
+    });
+
+  } catch (error) {
+    console.error('Error assigning chatbot:', error);
+    return res.status(500).json({ success: false, error: 'Failed to assign AI Agent', details: error.message });
+  }
+};
+
+export const unassignChatbot = async (req, res) => {
+  try {
+    const userId = req.user.owner_id;
+    const { contact_id } = req.body;
+
+    if (!contact_id) {
+      return res.status(400).json({ success: false, error: 'contact_id is required' });
+    }
+
+    const contact = await Contact.findOne({
+      _id: contact_id,
+      created_by: userId,
+      deleted_at: null
+    });
+
+    if (!contact) {
+      return res.status(404).json({ success: false, error: 'Contact not found' });
+    }
+
+    contact.assigned_chatbot = null;
+    contact.chatbot_paused = false;
+    contact.ai_message_count = 0;
+
+    await contact.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Chatbot unassigned successfully',
+      contact
+    });
+
+  } catch (error) {
+    console.error('Error in unassignChatbot:', error);
+    return res.status(500).json({ success: false, error: 'Failed to unassign chatbot', details: error.message });
+  }
+};
+
+export const toggleSnooze = async (req, res) => {
+  try {
+    const userId = req.user.owner_id;
+    const { contact_id: contactId, phone_number: phoneNumber, is_snoozed, snooze_time_minutes, snooze_count_limit } = req.body;
+
+    if (!contactId && !phoneNumber) {
+      return res.status(400).json({
+        success: false,
+        error: 'contact_id or phone_number is required'
+      });
+    }
+
+    let contact = null;
+
+    if (contactId) {
+      contact = await Contact.findById(contactId);
+    } else if (phoneNumber) {
+      contact = await Contact.findOne({
+        phone_number: phoneNumber,
+        created_by: userId,
+        deleted_at: null
+      });
+    }
+
+    if (!contact || contact.deleted_at) {
+      return res.status(404).json({
+        success: false,
+        error: 'Contact not found'
+      });
+    }
+
+    if (is_snoozed !== undefined) {
+      contact.is_snoozed = is_snoozed;
+    } else {
+      contact.is_snoozed = !contact.is_snoozed;
+    }
+
+    if (snooze_time_minutes !== undefined) contact.snooze_time_minutes = snooze_time_minutes;
+    if (snooze_count_limit !== undefined) contact.snooze_count_limit = snooze_count_limit;
+
+    if (!contact.is_snoozed) {
+      contact.snooze_count = 0;
+    }
+    await contact.save();
+
+    return res.json({
+      success: true,
+      data: {
+        id: contact._id.toString(),
+        is_snoozed: contact.is_snoozed,
+        snooze_time_minutes: contact.snooze_time_minutes,
+        snooze_count_limit: contact.snooze_count_limit
+      }
+    });
+  } catch (error) {
+    console.error('Error toggling snooze:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to toggle snooze',
+      details: error.message
+    });
+  }
+};
+
 const parseRecentChatsDate = (dateStr) => {
   if (!dateStr) return null;
   const d = new Date(dateStr);
@@ -1901,6 +2489,7 @@ export const getRecentChats = async (req, res) => {
 
       const matchQuery = {
         user_id: new mongoose.Types.ObjectId(userId),
+        message_type: { $ne: 'reaction' },
         deleted_at: null
       };
 
@@ -2085,6 +2674,7 @@ export const getRecentChats = async (req, res) => {
           name: contact.name,
           chat_status: contact.chat_status || 'open',
           is_pinned: contact.is_pinned === true,
+          is_snoozed: contact.is_snoozed === true,
           tags: contact.tags || []
         };
       });
@@ -2154,14 +2744,17 @@ export const getRecentChats = async (req, res) => {
         const contactId = chat.contact.id;
         const contactInfo = contactMap[contactId] || {
           is_pinned: false,
+          is_snoozed: false,
           chat_status: 'open'
         };
         return {
           ...chat,
           is_pinned: chat.is_pinned || contactInfo.is_pinned,
+          is_snoozed: contactInfo.is_snoozed,
           contact: {
             ...chat.contact,
             is_pinned: chat.is_pinned || contactInfo.is_pinned,
+            is_snoozed: contactInfo.is_snoozed,
             chat_status: contactInfo.chat_status,
             labels: mergeLabelDetails(contactId)
           }
@@ -2201,12 +2794,20 @@ export const getRecentChats = async (req, res) => {
       }
 
       if (filterLastMessageRead !== null) {
-        filteredChats = filteredChats.filter(chat => {
-          const last = chat.lastMessage;
-          if (!last) return false;
-          const isRead = last.is_seen === true || last.read_status === 'read' || last.read_status === 'read_by_multiple';
-          return filterLastMessageRead ? isRead : !isRead;
-        });
+        const contactsWithUnread = await Message.distinct('contact_id', {
+          direction: 'inbound',
+          deleted_at: null,
+          $or: [
+            { is_seen: false },
+            { read_status: 'unread' }
+          ]
+        }).then(ids => new Set(ids.map(id => id.toString())));
+
+        if (filterLastMessageRead === false) {
+          filteredChats = filteredChats.filter(chat => contactsWithUnread.has(chat.contact?.id));
+        } else {
+          filteredChats = filteredChats.filter(chat => !contactsWithUnread.has(chat.contact?.id));
+        }
       }
 
       if (filterStartDate || filterEndDate) {
@@ -2253,10 +2854,17 @@ export const getRecentChats = async (req, res) => {
           return acc;
         }, {});
 
-        filteredChats = filteredChats.map(chat => ({
-          ...chat,
-          unread_count: unreadCountMap[chat.contact.id] || 0
-        }));
+        filteredChats = filteredChats.map(chat => {
+          const unreadCountVal = unreadCountMap[chat.contact.id] || 0;
+          return {
+            ...chat,
+            unread_count: unreadCountVal,
+            lastMessage: chat.lastMessage ? {
+              ...chat.lastMessage,
+              unreadCount: unreadCountVal.toString()
+            } : null
+          };
+        });
       }
 
       return res.json({
@@ -2424,7 +3032,7 @@ export const getRecentChats = async (req, res) => {
       created_by: contactsOwnerId,
       deleted_at: null
     })
-      .select('_id phone_number name tags is_pinned chat_status')
+      .select('_id phone_number name tags is_pinned is_snoozed chat_status')
       .populate('tags', 'label color')
       .lean();
 
@@ -2433,7 +3041,8 @@ export const getRecentChats = async (req, res) => {
         id: contact._id.toString(),
         name: contact.name,
         chat_status: contact.chat_status || 'open',
-        is_pinned: contact.is_pinned === true
+        is_pinned: contact.is_pinned === true,
+        is_snoozed: contact.is_snoozed === true
       };
       return acc;
     }, {});
@@ -2525,10 +3134,12 @@ export const getRecentChats = async (req, res) => {
         const contactInfo = contactMap[chat.contact.number] || {
           id: null,
           name: chat.contact.number,
-          is_pinned: false
+          is_pinned: false,
+          is_snoozed: false
         };
 
         const isPinned = !!contactInfo.is_pinned;
+        const isSnoozed = !!contactInfo.is_snoozed;
         const contactId = contactInfo.id;
 
         let displayName = chat.contact.number;
@@ -2539,12 +3150,14 @@ export const getRecentChats = async (req, res) => {
         return {
           ...chat,
           is_pinned: isPinned,
+          is_snoozed: isSnoozed,
           contact: {
             ...chat.contact,
             id: contactId,
             number: displayName,
             name: contactInfo.name,
             is_pinned: isPinned,
+            is_snoozed: isSnoozed,
             chat_status: contactInfo.chat_status || 'open',
             labels: mergeLabelDetails(contactId)
           }
@@ -2555,10 +3168,12 @@ export const getRecentChats = async (req, res) => {
         const contactInfo = contactMap[chat.contact.number] || {
           id: null,
           name: chat.contact.number,
-          is_pinned: false
+          is_pinned: false,
+          is_snoozed: false
         };
 
         const isPinned = !!contactInfo.is_pinned;
+        const isSnoozed = !!contactInfo.is_snoozed;
         const contactId = contactInfo.id;
 
         let displayName = chat.contact.number;
@@ -2569,12 +3184,14 @@ export const getRecentChats = async (req, res) => {
         return {
           ...chat,
           is_pinned: isPinned,
+          is_snoozed: isSnoozed,
           contact: {
             ...chat.contact,
             id: contactId,
             number: displayName,
             name: contactInfo.name,
             is_pinned: isPinned,
+            is_snoozed: isSnoozed,
             chat_status: contactInfo.chat_status || 'open',
             labels: mergeLabelDetails(contactId)
           }
@@ -2626,12 +3243,20 @@ export const getRecentChats = async (req, res) => {
     }
 
     if (filterLastMessageRead !== null) {
-      filteredChats = filteredChats.filter(chat => {
-        const last = chat.lastMessage;
-        if (!last) return false;
-        const isRead = last.is_seen === true || last.read_status === 'read' || last.read_status === 'read_by_multiple';
-        return filterLastMessageRead ? isRead : !isRead;
-      });
+      const contactsWithUnread = await Message.distinct('contact_id', {
+        direction: 'inbound',
+        deleted_at: null,
+        $or: [
+          { is_seen: false },
+          { read_status: 'unread' }
+        ]
+      }).then(ids => new Set(ids.map(id => id.toString())));
+
+      if (filterLastMessageRead === false) {
+        filteredChats = filteredChats.filter(chat => contactsWithUnread.has(chat.contact?.id));
+      } else {
+        filteredChats = filteredChats.filter(chat => !contactsWithUnread.has(chat.contact?.id));
+      }
     }
 
     if (filterStartDate || filterEndDate) {
@@ -2694,8 +3319,8 @@ export const getRecentChats = async (req, res) => {
       const unreadCounts = await Message.aggregate([
         {
           $match: {
-            recipient_number: myPhoneNumber,
-            sender_number: { $in: filteredChats.map(c => c.contact.number) },
+            contact_id: { $in: filteredChats.map(c => new mongoose.Types.ObjectId(c.contact.id)).filter(Boolean) },
+            direction: 'inbound',
             deleted_at: null,
             $or: [
               { is_seen: false },
@@ -2705,21 +3330,28 @@ export const getRecentChats = async (req, res) => {
         },
         {
           $group: {
-            _id: '$sender_number',
+            _id: '$contact_id',
             count: { $sum: 1 }
           }
         }
       ]);
 
       const unreadCountMap = unreadCounts.reduce((acc, item) => {
-        acc[item._id] = item.count;
+        acc[item._id.toString()] = item.count;
         return acc;
       }, {});
 
-      filteredChats = filteredChats.map(chat => ({
-        ...chat,
-        unread_count: unreadCountMap[chat.contact.number] || 0
-      }));
+      filteredChats = filteredChats.map(chat => {
+        const unreadCountVal = unreadCountMap[chat.contact.id] || 0;
+        return {
+          ...chat,
+          unread_count: unreadCountVal,
+          lastMessage: chat.lastMessage ? {
+            ...chat.lastMessage,
+            unreadCount: unreadCountVal.toString()
+          } : null
+        };
+      });
     }
 
     return res.json({
@@ -2853,13 +3485,41 @@ export const connectWhatsApp = async (req, res) => {
 
       let phoneNumber = await WhatsappPhoneNumber.findOne({
         phone_number_id
+      }).populate('waba_id');
+
+      if (phoneNumber && phoneNumber.deleted_at === null) {
+        if (phoneNumber.user_id.toString() !== userId.toString()) {
+          return res.status(400).json({
+            success: false,
+            error: 'This WhatsApp phone number is already connected to another user.'
+          });
+        }
+        if (workspace_id && phoneNumber.waba_id && phoneNumber.waba_id.workspace_id && phoneNumber.waba_id.workspace_id.toString() !== workspace_id.toString()) {
+          return res.status(400).json({
+            success: false,
+            error: 'This WhatsApp phone number is already connected to another workspace.'
+          });
+        }
+      }
+
+      let wabaCheck = await WhatsappWaba.findOne({
+        whatsapp_business_account_id,
+        deleted_at: null
       });
 
-      if (phoneNumber && phoneNumber.user_id.toString() !== userId.toString() && phoneNumber.deleted_at === null) {
-        return res.status(400).json({
-          success: false,
-          error: 'This WhatsApp phone number is already connected to another workspace or user.'
-        });
+      if (wabaCheck) {
+        if (wabaCheck.user_id.toString() !== userId.toString()) {
+          return res.status(400).json({
+            success: false,
+            error: 'This WhatsApp Business Account is already connected to another user.'
+          });
+        }
+        if (workspace_id && wabaCheck.workspace_id && wabaCheck.workspace_id.toString() !== workspace_id.toString()) {
+          return res.status(400).json({
+            success: false,
+            error: 'This WhatsApp Business Account is already connected to another workspace.'
+          });
+        }
       }
 
       if (workspace_id) {
@@ -3061,13 +3721,41 @@ export const getEmbbededSignupConnection = async (req, res) => {
 
     let phoneNumber = await WhatsappPhoneNumber.findOne({
       phone_number_id: signupData.phone_number_id
+    }).populate('waba_id');
+
+    if (phoneNumber && phoneNumber.deleted_at === null) {
+      if (phoneNumber.user_id.toString() !== userId.toString()) {
+        return res.status(400).json({
+          success: false,
+          error: 'This WhatsApp phone number is already connected to another user.'
+        });
+      }
+      if (workspace_id && phoneNumber.waba_id && phoneNumber.waba_id.workspace_id && phoneNumber.waba_id.workspace_id.toString() !== workspace_id.toString()) {
+        return res.status(400).json({
+          success: false,
+          error: 'This WhatsApp phone number is already connected to another workspace.'
+        });
+      }
+    }
+
+    let wabaCheck = await WhatsappWaba.findOne({
+      whatsapp_business_account_id: signupData.waba_id,
+      deleted_at: null
     });
 
-    if (phoneNumber && phoneNumber.user_id.toString() !== userId.toString() && phoneNumber.deleted_at === null) {
-      return res.status(400).json({
-        success: false,
-        error: 'This WhatsApp phone number is already connected to another workspace or user.'
-      });
+    if (wabaCheck) {
+      if (wabaCheck.user_id.toString() !== userId.toString()) {
+        return res.status(400).json({
+          success: false,
+          error: 'This WhatsApp Business Account is already connected to another user.'
+        });
+      }
+      if (workspace_id && wabaCheck.workspace_id && wabaCheck.workspace_id.toString() !== workspace_id.toString()) {
+        return res.status(400).json({
+          success: false,
+          error: 'This WhatsApp Business Account is already connected to another workspace.'
+        });
+      }
     }
 
     if (workspace_id) {
@@ -3467,17 +4155,12 @@ export const getWabaPhoneNumbers = async (req, res) => {
           }
         }
 
-        let displayName = phone.display_phone_number;
-        if (verified_name && verified_name !== 'N/A' && verified_name.trim() !== '') {
-          displayName = verified_name;
-        }
-
         enrichedPhoneNumbers.push({
           id: phone._id.toString(),
           phone_number_id: phone.phone_number_id,
           verified_name: verified_name ?? "N/A",
           quality_rating: quality_rating ?? "N/A",
-          display_phone_number: displayName,
+          display_phone_number: phone.display_phone_number,
           is_primary: phone.is_primary || false
         });
       })
@@ -3790,6 +4473,44 @@ const sendMultipleMediaUrls = async (params, res) => {
     const sentMessages = [];
     const failedUrls = [];
 
+    // 1. Process uploaded files first
+    for (let i = 0; i < uploadedFiles.length; i++) {
+      const file = uploadedFiles[i];
+      try {
+        const mediaType = getWhatsAppTypeFromMime(file.mimetype) || 'document';
+
+        const fileCaption = messageText || undefined;
+
+        const messageParams = {
+          contactId: contact._id,
+          recipientNumber: contact.phone_number,
+          messageText: fileCaption,
+          messageType: mediaType,
+          file,
+          providerType,
+          connectionId,
+          whatsappPhoneNumber,
+          whatsappPhoneNumberId,
+          replyMessageId
+        };
+
+        const result = await unifiedWhatsAppService.sendMessage(userId, messageParams);
+        sentMessages.push({
+          fileName: file.originalname,
+          type: mediaType,
+          result: result
+        });
+
+      } catch (error) {
+        console.error(`Error sending uploaded file ${file.originalname}:`, error);
+        failedItems.push({
+          fileName: file.originalname,
+          error: error.message
+        });
+      }
+    }
+
+    // 2. Process media URLs
     for (let i = 0; i < mediaUrls.length; i++) {
       const mediaUrl = mediaUrls[i];
       const isLast = i === mediaUrls.length - 1;
@@ -3797,9 +4518,8 @@ const sendMultipleMediaUrls = async (params, res) => {
       try {
         const mediaType = getMediaTypeFromUrl(mediaUrl);
 
-        const fileCaption = mediaUrls.length > 1
-          ? `${messageText || 'Shared media'} (${i + 1}/${mediaUrls.length})`
-          : messageText || 'Shared media';
+        const currentIdx = uploadedFiles.length + i;
+        const fileCaption = messageText || undefined;
 
         const messageParams = {
           recipientNumber: contact.phone_number,
@@ -4200,7 +4920,10 @@ export const clearChat = async (req, res) => {
       return res.status(404).json({ success: false, error: 'Contact not found' });
     }
 
-    const platform = contact.source || 'whatsapp';
+    let platform = contact.source || 'whatsapp';
+    if (platform === 'baileys') {
+      platform = 'whatsapp';
+    }
     const contactNumber = contact.phone_number || contact.telegram_chat_id || contact.facebook_page_scoped_id || contact.instagram_scoped_id;
 
     let myPhoneNumber = contactNumber;
@@ -4237,9 +4960,37 @@ export const clearChat = async (req, res) => {
       }
     }
 
-    await Message.deleteMany({ contact_id: contact._id, user_id: userId });
+    await Message.deleteMany({
+      user_id: userId,
+      $or: [
+        { contact_id: contact._id },
+        { sender_number: contactNumber },
+        { recipient_number: contactNumber },
+        { sender_id: contactNumber },
+        { recipient_id: contactNumber }
+      ]
+    });
 
     const mockId = new mongoose.Types.ObjectId().toString();
+
+    await Message.create({
+      _id: mockId,
+      user_id: userId,
+      contact_id: contact._id,
+      sender_number: myPhoneNumber,
+      recipient_number: contactNumber,
+      sender_id: senderId || myPhoneNumber,
+      recipient_id: recipientId || contactNumber,
+      platform: platform,
+      provider: provider || platform,
+      content: 'Chat cleared',
+      message_type: 'system_messages',
+      from_me: true,
+      direction: 'outbound',
+      wa_timestamp: new Date(),
+      created_at: new Date(),
+      workspace_id: workspaceId || contact.workspace_id || null
+    });
 
     if (unifiedService.io) {
       unifiedService.io.emit('whatsapp:message', {
@@ -4253,12 +5004,15 @@ export const clearChat = async (req, res) => {
         recipient: { id: recipientId || contactNumber },
         platform: platform,
         provider: provider || platform,
+        content: 'Chat cleared',
         messageText: 'Chat cleared',
         messageType: 'system_messages',
         fromMe: true,
         direction: 'outbound',
         createdAt: new Date(),
-        wa_timestamp: new Date()
+        wa_timestamp: new Date(),
+        user_id: userId.toString(),
+        workspace_id: workspaceId || contact.workspace_id || null
       });
     }
 
@@ -4286,6 +5040,11 @@ export const clearChat = async (req, res) => {
         }
       }
     }
+    contact.last_incoming_message_at = null;
+    contact.last_outgoing_message_at = null;
+    contact.snooze_count = 0;
+    contact.is_snoozed = false;
+    await contact.save();
 
     return res.status(200).json({ success: true, message: 'Chat cleared successfully' });
   } catch (error) {
@@ -4294,11 +5053,189 @@ export const clearChat = async (req, res) => {
   }
 };
 
+export const deleteChat = async (req, res) => {
+  try {
+    const userId = req.user.owner_id;
+    const { workspace_id, contact_ids } = req.body;
+
+    if (!Array.isArray(contact_ids) || contact_ids.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'contact_ids (array) is required'
+      });
+    }
+
+    const contactObjectIds = contact_ids
+      .filter(id => mongoose.Types.ObjectId.isValid(id))
+      .map(id => new mongoose.Types.ObjectId(id));
+
+    if (contactObjectIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No valid contact IDs provided'
+      });
+    }
+
+    // 1. Soft delete contacts
+    const contactUpdateResult = await Contact.updateMany(
+      {
+        _id: { $in: contactObjectIds },
+        user_id: userId,
+        deleted_at: null
+      },
+      {
+        $set: { deleted_at: new Date() }
+      }
+    );
+
+    // 2. Soft delete messages
+    const messageUpdateResult = await Message.updateMany(
+      {
+        contact_id: { $in: contactObjectIds },
+        user_id: userId,
+        deleted_at: null
+      },
+      {
+        $set: { deleted_at: new Date() }
+      }
+    );
+
+    // Emit socket event for real-time updates
+    const io = req.app.get('io');
+    if (io) {
+      contact_ids.forEach(id => {
+        io.emit('whatsapp:chat-deleted', {
+          contact_id: id,
+          user_id: userId.toString(),
+          workspace_id: workspace_id || null
+        });
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `${contactUpdateResult.modifiedCount} contact(s) and their messages deleted successfully.`,
+      data: {
+        deletedContactsCount: contactUpdateResult.modifiedCount,
+        deletedMessagesCount: messageUpdateResult.modifiedCount
+      }
+    });
+
+  } catch (error) {
+    console.error('Error deleting chats:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to delete chats',
+      details: error.message
+    });
+  }
+};
+
+export const sendProductMessage = async (req, res) => {
+  try {
+    const { product_id } = req.body;
+
+    if (!product_id) {
+      return res.status(400).json({ success: false, error: 'product_id is required' });
+    }
+
+    const product = await EcommerceProduct.findById(product_id).lean();
+    if (!product) {
+      return res.status(404).json({ success: false, error: 'Product not found' });
+    }
+
+    const product_name = product.name || 'Product Details';
+    const product_price = product.price ? (product.currency ? `${product.currency} ${product.price}` : product.price) : 'N/A';
+    const product_description = product.description || [
+      product.brand ? `Brand: ${product.brand}` : '',
+      product.category ? `Category: ${product.category}` : ''
+    ].filter(Boolean).join(' | ');
+    const product_image = product.image_urls && Array.isArray(product.image_urls)
+      ? product.image_urls.filter(Boolean).map(url => url.trim()).filter(url => url !== '')[0] || null
+      : null;
+    const product_url = product.url || 'https://shopify.com';
+    const source = product.type;
+
+    const messageCaption = `*${product_name}*\n*Price:* ${product_price}${product_description ? `\n\n${product_description}` : ''}`;
+
+    const productButton = {
+      type: 'url',
+      text: source === 'catalog' ? 'View Catalog' : 'View Product',
+      url: product_url
+    };
+
+    req.body.messageText = messageCaption.trim();
+    req.body.messageType = 'interactive';
+    req.body.interactiveType = 'cta_url';
+    if (product_image) {
+      req.body.mediaUrl = product_image;
+    }
+    req.body.buttons = [productButton];
+    req.body.buttonParams = {
+      display_text: productButton.text,
+      url: productButton.url
+    };
+
+    return await sendMessage(req, res);
+  } catch (error) {
+    console.error('Error in sendProductMessage:', error);
+    return res.status(500).json({ success: false, error: 'Failed to send product message', details: error.message });
+  }
+};
+
+export const sendOrderMessage = async (req, res) => {
+  try {
+    const { product_id, checkout_url, order_title, order_description } = req.body;
+
+    if (!product_id) {
+      return res.status(400).json({ success: false, error: 'product_id is required' });
+    }
+
+    const product = await EcommerceProduct.findById(product_id).lean();
+    if (!product) {
+      return res.status(404).json({ success: false, error: 'Product not found' });
+    }
+
+    const product_name = product.name || 'Item';
+    const order_amount = product.price ? (product.currency ? `${product.currency} ${product.price}` : product.price) : '$0.00';
+
+    const final_order_title = order_title || 'Order Information';
+    const final_order_desc = order_description || 'Click the link below to complete your secure payment.';
+
+    const orderText = `*${final_order_title}*\n\n*Product:* ${product_name}\n*Total Amount:* ${order_amount}\n\n${final_order_desc}`;
+
+    const orderButton = {
+      type: 'url',
+      text: 'View Order',
+      url: checkout_url || product.url || 'https://shopify.com/checkout'
+    };
+
+    req.body.messageText = orderText;
+    req.body.messageType = 'interactive';
+    req.body.interactiveType = 'cta_url';
+    req.body.buttons = [orderButton];
+    req.body.buttonParams = {
+      display_text: orderButton.text,
+      url: orderButton.url
+    };
+
+    return await sendMessage(req, res);
+  } catch (error) {
+    console.error('Error in sendOrderMessage:', error);
+    return res.status(500).json({ success: false, error: 'Failed to send order message', details: error.message });
+  }
+};
+
 export default {
   sendMessage,
+  sendProductMessage,
+  sendOrderMessage,
   getContactProfile,
   getMessages,
   togglePinChat,
+  toggleSnooze,
+  assignChatbot,
+  unassignChatbot,
   getRecentChats,
   assignChatToAgent,
   getConnectionStatus,
@@ -4313,6 +5250,7 @@ export default {
   getEmbbededSignupConnection,
   getMessageLogs,
   clearChat,
+  deleteChat,
   disconnectWhatsApp,
   getWabaList
 };

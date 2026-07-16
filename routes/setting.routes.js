@@ -24,7 +24,8 @@ const logoFields = [
   { name: 'logo_light_url', maxCount: 1 },
   { name: 'logo_dark_url', maxCount: 1 },
   { name: 'sidebar_light_logo_url', maxCount: 1 },
-  { name: 'sidebar_dark_logo_url', maxCount: 1 }
+  { name: 'sidebar_dark_logo_url', maxCount: 1 },
+  { name: 'popup_image_url', maxCount: 1 }
 ];
 
 

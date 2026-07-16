@@ -107,17 +107,19 @@ class PaymentLinkService {
       whatsapp_phone_number_id: finalPhId
     });
 
-    await this._sendWhatsAppPaymentMessage({
-      userId: user_id,
-      contact,
-      paymentLink: linkResult.payment_link,
-      amount,
-      currency,
-      description,
-      whatsappPhoneNumberId: finalPhId,
-      templateConfig,
-      transaction
-    });
+    if (!opts.skip_message) {
+      await this._sendWhatsAppPaymentMessage({
+        userId: user_id,
+        contact,
+        paymentLink: linkResult.payment_link,
+        amount,
+        currency,
+        description,
+        whatsappPhoneNumberId: finalPhId,
+        templateConfig,
+        transaction
+      });
+    }
 
     try {
       const settings = await UserSetting.findOne({ user_id }).lean();

@@ -70,6 +70,7 @@ export const getWorkspaces = async (req, res) => {
             const instagram = instagramConns.find(i => i.workspace_id.toString() === ws._id.toString());
             const facebook = facebookConns.find(f => f.workspace_id.toString() === ws._id.toString());
 
+
             let wabaId = null;
             let connectionStatus = null;
             let wabaType = null;
@@ -194,6 +195,10 @@ export const deleteWorkspace = async (req, res) => {
             await WhatsappWaba.deleteMany({ _id: { $in: wabaIds } });
         }
 
+        await TelegramConnection.deleteMany({ workspace_id: id });
+        await InstagramConnection.deleteMany({ workspace_id: id });
+        await FacebookConnection.deleteMany({ workspace_id: id });
+
 
         return res.json({
             success: true,
@@ -213,11 +218,13 @@ export const getConnectedWorkspaces = async (req, res) => {
     try {
         const userId = req.user.owner_id;
 
-        const connectedWabas = await WhatsappWaba.find({
-            user_id: userId,
-            workspace_id: { $exists: true, $ne: null },
-            deleted_at: null
-        }).select('workspace_id whatsapp_business_account_id name').lean();
+        const [connectedWabas] = await Promise.all([
+            WhatsappWaba.find({
+                user_id: userId,
+                workspace_id: { $exists: true, $ne: null },
+                deleted_at: null
+            }).select('workspace_id whatsapp_business_account_id name provider connection_status').lean()
+        ]);
 
         if (connectedWabas.length === 0) {
             return res.json({
@@ -227,18 +234,28 @@ export const getConnectedWorkspaces = async (req, res) => {
         }
 
         const workspaceIds = connectedWabas.map(w => w.workspace_id);
+        
+        const uniqueWorkspaceIds = [...new Set(workspaceIds.map(id => id.toString()))];
+
         const workspaces = await Workspace.find({
-            _id: { $in: workspaceIds },
+            _id: { $in: uniqueWorkspaceIds },
             deleted_at: null
         }).lean();
 
         const result = workspaces.map(ws => {
             const waba = connectedWabas.find(w => w.workspace_id.toString() === ws._id.toString());
+            
+            let waba_type = null;
+            if (waba) {
+                waba_type = waba.provider || 'business_api';
+            }
+
             return {
                 ...ws,
                 waba_id: waba ? waba.whatsapp_business_account_id : null,
                 waba_db_id: waba ? waba._id : null,
-                waba_name: waba ? waba.name : null
+                waba_name: waba ? waba.name : null,
+                waba_type: waba_type
             };
         });
 

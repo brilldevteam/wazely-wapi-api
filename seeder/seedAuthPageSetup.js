@@ -126,7 +126,7 @@ const seedAuthPageSetup = async () => {
       }
     };
 
-    await AuthPageSetup.findOneAndUpdate({}, authData, { upsert: true, returnDocument: 'after' });
+    await AuthPageSetup.findOneAndUpdate({}, { $setOnInsert: authData }, { upsert: true, returnDocument: 'after' });
 
     console.log('Auth Page Setup seeded successfully!');
   } catch (error) {

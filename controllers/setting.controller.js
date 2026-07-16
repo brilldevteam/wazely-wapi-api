@@ -24,7 +24,7 @@ const getAllSettings = async (req, res) => {
   }
   const out = settings.toObject ? settings.toObject() : { ...settings };
 
- try {
+  try {
     const pages = await Page.find({ status: true, deleted_at: null });
     out.pages = pages.map(p => ({ _id: p._id, title: p.title, slug: p.slug, system_reserved: p.system_reserved }));
 
@@ -44,7 +44,7 @@ const getAllSettings = async (req, res) => {
     out.pages = [];
   }
 
-  const logoFields = ['favicon_url', 'logo_light_url', 'logo_dark_url', 'sidebar_light_logo_url', 'sidebar_dark_logo_url'];
+  const logoFields = ['favicon_url', 'logo_light_url', 'logo_dark_url', 'sidebar_light_logo_url', 'sidebar_dark_logo_url', 'popup_image_url'];
   const baseUrl = process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
 
   for (const field of logoFields) {
@@ -151,7 +151,10 @@ const getAllSettings = async (req, res) => {
     out.app_secret = out.app_secret.substring(0, 8) + '****';
   }
 
-  const client_ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+  let client_ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+  if (client_ip && typeof client_ip === 'string' && client_ip.includes(',')) {
+    client_ip = client_ip.split(',')[0].trim();
+  }
   out.client_ip = client_ip?.replace('::ffff:', '') || '';
   out.maintenance_allowed_ips = settings.maintenance_allowed_ips || [];
   out.otp_delivery_method = settings.otp_delivery_method || 'email';
@@ -175,6 +178,14 @@ const getAllSettings = async (req, res) => {
   out.widget_facebook_url = settings.widget_facebook_url || '';
   out.widget_sms_url = settings.widget_sms_url || '';
 
+  out.is_popup = settings.is_popup !== undefined ? settings.is_popup : false;
+  out.popup_image_url = settings.popup_image_url !== undefined ? settings.popup_image_url : '';
+  out.popup_title = settings.popup_title !== undefined ? settings.popup_title : '';
+  out.popup_description = settings.popup_description !== undefined ? settings.popup_description : '';
+  out.popup_bullets = settings.popup_bullets !== undefined ? settings.popup_bullets : [];
+  out.popup_button_text = settings.popup_button_text !== undefined ? settings.popup_button_text : '';
+  out.popup_button_url = settings.popup_button_url !== undefined ? settings.popup_button_url : '';
+
   res.status(200).json(out);
 };
 
@@ -197,7 +208,7 @@ const updateSetting = async (req, res) => {
       }
     });
 
-    const logoFields = ['favicon_url', 'logo_light_url', 'logo_dark_url', 'sidebar_light_logo_url', 'sidebar_dark_logo_url'];
+    const logoFields = ['favicon_url', 'logo_light_url', 'logo_dark_url', 'sidebar_light_logo_url', 'sidebar_dark_logo_url', 'popup_image_url'];
 
     for (const field of logoFields) {
       const uploadedFile = req.files && req.files[field] ? req.files[field] : null;
@@ -448,6 +459,36 @@ const updateSetting = async (req, res) => {
       processedBody.widget_sms_url = req.body.widget_sms_url;
     }
 
+    if (req.body.is_popup !== undefined) {
+      processedBody.is_popup = req.body.is_popup === true || req.body.is_popup === 'true';
+    }
+    if (req.body.popup_title !== undefined) {
+      processedBody.popup_title = req.body.popup_title;
+    }
+    if (req.body.popup_description !== undefined) {
+      processedBody.popup_description = req.body.popup_description;
+    }
+    if (req.body.popup_button_text !== undefined) {
+      processedBody.popup_button_text = req.body.popup_button_text;
+    }
+    if (req.body.popup_button_url !== undefined) {
+      processedBody.popup_button_url = req.body.popup_button_url;
+    }
+    if (req.body.popup_bullets !== undefined) {
+      if (typeof req.body.popup_bullets === 'string') {
+        try {
+          processedBody.popup_bullets = JSON.parse(req.body.popup_bullets);
+        } catch {
+          processedBody.popup_bullets = req.body.popup_bullets
+            .split(',')
+            .map(item => item.trim())
+            .filter(item => item);
+        }
+      } else {
+        processedBody.popup_bullets = req.body.popup_bullets;
+      }
+    }
+
     if (setting) {
       const updatedSetting = await Setting.findByIdAndUpdate(setting._id, processedBody, {
         returnDocument: 'after',
@@ -462,18 +503,18 @@ const updateSetting = async (req, res) => {
     if (processedBody.omnichannel_platforms !== undefined) {
       let activePlatforms = processedBody.omnichannel_platforms;
       if (typeof activePlatforms === 'string') {
-        try { activePlatforms = JSON.parse(activePlatforms); } 
+        try { activePlatforms = JSON.parse(activePlatforms); }
         catch { activePlatforms = activePlatforms.split(',').map(i => i.trim()); }
       }
-      
+
       const allOmni = ['facebook', 'instagram', 'telegram', 'twitter'];
       const disabledOmni = allOmni.filter(p => !activePlatforms.includes(p));
-      
+
       if (disabledOmni.length > 0) {
         const updateQuery = { $set: {} };
         disabledOmni.forEach(p => {
-           updateQuery.$set[`features.omnichannel_${p}`] = false;
-           updateQuery.$set[`enabled_features.omnichannel_${p}`] = false;
+          updateQuery.$set[`features.omnichannel_${p}`] = false;
+          updateQuery.$set[`enabled_features.omnichannel_${p}`] = false;
         });
         await Plan.updateMany({}, updateQuery);
       }
@@ -557,7 +598,7 @@ const testMail = async (req, res) => {
     const port = (smtp_port != null && String(smtp_port).trim() !== '') ? parseInt(smtp_port, 10) : (parseInt(process.env.SMTP_PORT, 10) || 587);
     const user = (smtp_user != null && String(smtp_user).trim() !== '') ? String(smtp_user).trim() : (process.env.SMTP_USER || '');
     const pass = (smtp_pass != null && String(smtp_pass).trim() !== '') ? String(smtp_pass) : (process.env.SMTP_PASS || '');
-    const fromName = (mail_from_name != null && String(mail_from_name).trim()) ? String(mail_from_name).trim() : (process.env.MAIL_FROM_NAME || 'WhatsDesk');
+    const fromName = (mail_from_name != null && String(mail_from_name).trim()) ? String(mail_from_name).trim() : (process.env.MAIL_FROM_NAME || 'Wapi');
     const fromEmail = (mail_from_email != null && String(mail_from_email).trim()) ? String(mail_from_email).trim() : (process.env.MAIL_FROM_EMAIL || user);
 
     if (!host || !user || !pass) {
@@ -578,8 +619,8 @@ const testMail = async (req, res) => {
     await transporter.sendMail({
       from,
       to: toEmail,
-      subject: 'WhatsDesk – Test email',
-      html: '<p>This is a test email from your WhatsDesk mail settings. If you received this, your SMTP configuration is working.</p>'
+      subject: 'Test email',
+      html: '<p>This is a test email from your Wapi mail settings. If you received this, your SMTP configuration is working.</p>'
     });
 
     return res.status(200).json({
@@ -600,7 +641,11 @@ const testMail = async (req, res) => {
 
 const updateStripeSettings = async (req, res) => {
   try {
-    const { stripe_publishable_key, stripe_secret_key } = req.body;
+    let setting = await Setting.findOne();
+    if (!setting) setting = await Setting.create({});
+
+    const stripe_publishable_key = (req.body.stripe_publishable_key && req.body.stripe_publishable_key.trim() !== '') ? req.body.stripe_publishable_key.trim() : setting.stripe_publishable_key;
+    const stripe_secret_key = (req.body.stripe_secret_key && req.body.stripe_secret_key.trim() !== '') ? req.body.stripe_secret_key.trim() : setting.stripe_secret_key;
 
     if (!stripe_secret_key || typeof stripe_secret_key !== 'string' || !stripe_secret_key.trim()) {
       return res.status(400).json({
@@ -625,7 +670,7 @@ const updateStripeSettings = async (req, res) => {
     const endpoint = await stripe.webhookEndpoints.create({
       url: webhookUrl,
       enabled_events: STRIPE_WEBHOOK_EVENTS,
-      description: 'WhatsDesk subscription and checkout events'
+      description: 'Wapi subscription and checkout events'
     });
 
     const webhookSecret = endpoint.secret;
@@ -634,11 +679,6 @@ const updateStripeSettings = async (req, res) => {
         success: false,
         message: 'Stripe did not return a webhook signing secret'
       });
-    }
-
-    let setting = await Setting.findOne();
-    if (!setting) {
-      setting = await Setting.create({});
     }
 
     const update = {
@@ -748,7 +788,12 @@ const RAZORPAY_WEBHOOK_EVENTS = [
 
 const updateRazorpaySettings = async (req, res) => {
   try {
-    const { razorpay_key_id, razorpay_key_secret, razorpay_webhook_secret } = req.body;
+    let setting = await Setting.findOne();
+    if (!setting) setting = await Setting.create({});
+
+    const razorpay_key_id = (req.body.razorpay_key_id && req.body.razorpay_key_id.trim() !== '') ? req.body.razorpay_key_id.trim() : setting.razorpay_key_id;
+    const razorpay_key_secret = (req.body.razorpay_key_secret && req.body.razorpay_key_secret.trim() !== '') ? req.body.razorpay_key_secret.trim() : setting.razorpay_key_secret;
+    const razorpay_webhook_secret = (req.body.razorpay_webhook_secret && req.body.razorpay_webhook_secret.trim() !== '') ? req.body.razorpay_webhook_secret.trim() : setting.razorpay_webhook_secret;
 
     if (!razorpay_key_id || typeof razorpay_key_id !== 'string' || !razorpay_key_id.trim()) {
       return res.status(400).json({
@@ -815,11 +860,6 @@ const updateRazorpaySettings = async (req, res) => {
       }
     } catch (e) {
       console.log('Ignore Razorpay webhook configuration error (might be restricted by Razorpay keys):', e.message);
-    }
-
-    let setting = await Setting.findOne();
-    if (!setting) {
-      setting = await Setting.create({});
     }
 
     const update = {
@@ -929,7 +969,13 @@ const getPayPalSettings = async (req, res) => {
 
 const updatePayPalSettings = async (req, res) => {
   try {
-    const { paypal_client_id, paypal_client_secret, paypal_mode, is_paypal_active } = req.body;
+    let setting = await Setting.findOne();
+    if (!setting) setting = await Setting.create({});
+
+    const paypal_client_id = (req.body.paypal_client_id && req.body.paypal_client_id.trim() !== '') ? req.body.paypal_client_id.trim() : setting.paypal_client_id;
+    const paypal_client_secret = (req.body.paypal_client_secret && req.body.paypal_client_secret.trim() !== '') ? req.body.paypal_client_secret.trim() : setting.paypal_client_secret;
+    const paypal_mode = req.body.paypal_mode || setting.paypal_mode || 'sandbox';
+    const is_paypal_active = req.body.is_paypal_active !== undefined ? req.body.is_paypal_active : setting.is_paypal_active;
 
     if (!paypal_client_id || !paypal_client_id.trim()) {
       return res.status(400).json({ success: false, message: 'PayPal client ID is required' });
@@ -950,11 +996,6 @@ const updatePayPalSettings = async (req, res) => {
       webhookId = webhook.id;
     } catch (e) {
       console.error('Error registering PayPal webhook during settings update:', e.message);
-    }
-
-    let setting = await Setting.findOne();
-    if (!setting) {
-      setting = await Setting.create({});
     }
 
     setting.paypal_client_id = paypal_client_id.trim();

@@ -647,6 +647,10 @@ export const getUserProducts = async (req, res) => {
       baseFilter.catalog_id = catalog_id;
     }
 
+    if (req.query.type) {
+      baseFilter.type = req.query.type;
+    }
+
     const combinedFilter = { ...baseFilter, ...searchQuery };
 
     const totalCount = await EcommerceProduct.countDocuments(combinedFilter);

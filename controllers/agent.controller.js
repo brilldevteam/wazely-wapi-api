@@ -154,34 +154,19 @@ const buildDuplicateAgentQuery = ({ email, phone, ownerId, excludeId = null }) =
             { phone, created_by: ownerId }
         ]
     };
-
-    if (excludeId) {
-        query._id = { $ne: excludeId };
-    }
-
+    if (excludeId) query._id = { $ne: excludeId };
     return query;
 };
 
-const getDuplicateAgentMessage = (duplicateAgent, normalizedEmail) => {
-    if (duplicateAgent?.email === normalizedEmail) {
-        return 'A user with this email already exists';
-    }
-
-    return 'AGENT with this phone already exists';
-};
+const getDuplicateAgentMessage = (duplicateAgent, normalizedEmail) =>
+    duplicateAgent?.email === normalizedEmail
+        ? 'A user with this email already exists'
+        : 'AGENT with this phone already exists';
 
 const duplicateKeyResponse = (error, res) => {
-    if (error?.code !== 11000) {
-        return null;
-    }
-
+    if (error?.code !== 11000) return null;
     const duplicateField = Object.keys(error.keyPattern || error.keyValue || {})[0];
-    const fieldLabel = duplicateField === 'email'
-        ? 'email'
-        : duplicateField === 'phone'
-            ? 'phone'
-            : 'value';
-
+    const fieldLabel = duplicateField === 'email' ? 'email' : duplicateField === 'phone' ? 'phone' : 'value';
     return res.status(409).json({
         success: false,
         message: `A user with this ${fieldLabel} already exists`
@@ -261,10 +246,7 @@ export const createAgent = async (req, res) => {
         }
 
         if (!mongoose.Types.ObjectId.isValid(team_id)) {
-            return res.status(400).json({
-                success: false,
-                message: 'Valid Team ID is required'
-            });
+            return res.status(400).json({ success: false, message: 'Valid Team ID is required' });
         }
 
         const team = await Team.findOne({
@@ -292,7 +274,6 @@ export const createAgent = async (req, res) => {
         }
 
         await retireDeletedUsersWithEmail(User, normalizedEmail);
-
         const duplicateAgent = await User.findOne(buildDuplicateAgentQuery({
             email: normalizedEmail,
             phone: normalizedPhone,
@@ -343,7 +324,6 @@ export const createAgent = async (req, res) => {
         console.error('Error creating AGENT:', error);
         const response = duplicateKeyResponse(error, res);
         if (response) return response;
-
         return res.status(500).json({
             success: false,
             message: 'Failed to create AGENT',
@@ -446,7 +426,6 @@ export const updateAgent = async (req, res) => {
         console.error('Error updating AGENT:', error);
         const response = duplicateKeyResponse(error, res);
         if (response) return response;
-
         return res.status(500).json({
             success: false,
             message: 'Failed to update AGENT',

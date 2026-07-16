@@ -91,6 +91,7 @@ app.use(createInstallationMiddleware());
 import webhookRoutes from "./routes/webhook.routes.js";
 app.use("/api/webhook", webhookRoutes);
 
+
 import authRoutes from "./routes/auth.routes.js";
 import faqRoutes from "./routes/faq.routes.js";
 import inquiryRoutes from "./routes/contact-inquiries.routes.js";
@@ -150,6 +151,7 @@ import facebookRoutes from "./routes/facebook.routes.js";
 import facebookAdRoutes from "./routes/facebook-ad-campaign.routes.js";
 import facebookLeadRoutes from "./routes/facebook-lead.routes.js";
 import omnichannelConnectionRoutes from "./routes/omnichannel-connection.routes.js";
+
 
 import wabaConfigurationRoutes from "./routes/waba-configuration.routes.js";
 import messageBotRoutes from "./routes/message-bot.routes.js";
@@ -265,6 +267,7 @@ app.use("/api/facebook", facebookRoutes);
 app.use("/api/facebook-ads", facebookAdRoutes);
 app.use("/api/facebook-leads", facebookLeadRoutes);
 app.use("/api/channels", omnichannelConnectionRoutes);
+
 app.use("/api/guides", guideRoutes);
 app.use("/api/self-tenant", selfTenantRoutes);
 app.use("/api/email-templates", emailTemplateRoutes);
@@ -306,9 +309,9 @@ app.get("/instagram-callback", (req, res) => {
   const state = req.query.state;
   const error = req.query.error;
   const error_reason = req.query.error_reason;
-
+  
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-
+  
   if (code) {
     res.redirect(`${frontendUrl}/instagram-callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`);
   } else if (error) {
@@ -355,7 +358,12 @@ app.post("/webhook/whatsapp", (req, res) => {
     });
     return res.sendStatus(200);
   } else {
-    console.log("Unknown WhatsApp webhook type:", req.body);
+    const isInformationalEvent = changes?.field === 'account_update' || changes?.field === 'waba_alerts' || changes?.field === 'security' || changes?.field === 'template_alerts';
+    if (isInformationalEvent) {
+      console.log(`[WhatsApp Webhook] Received Meta informational event (${changes?.field}). Acknowledging successfully.`);
+    } else {
+      console.log("Unknown WhatsApp webhook type:", req.body);
+    }
     return res.sendStatus(200);
   }
 });

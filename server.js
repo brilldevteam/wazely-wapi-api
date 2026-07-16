@@ -13,6 +13,7 @@ import './utils/system-settings.js';
 import { getSequenceQueue } from './queues/sequence-queue.js';
 import statusCronService from './cronjob/status.cronService.js';
 import trialPeriodCronService from './cronjob/trialPeriod.cronService.js';
+import snoozeCronService from './cronjob/snooze.cronService.js';
 // import twitterPollCronService from './cronjob/twitter-poll.cronService.js'; // DISABLED: Twitter not working
 import EmailTemplateService from './services/email-template.service.js';
 
@@ -88,6 +89,7 @@ io.on('connection', (socket) => {
     await fixPlatformData();
     await statusCronService();
     await trialPeriodCronService();
+    await snoozeCronService(app);
     // await twitterPollCronService(app); // DISABLED: Twitter not working
     await EmailTemplateService.init();
 

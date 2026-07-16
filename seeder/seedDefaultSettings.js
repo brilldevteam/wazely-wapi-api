@@ -103,11 +103,18 @@ async function seedDefaultSettings() {
       banner_text: 'Welcome to our platform! Enjoy our premium services.',
       banner_possion: 'center',
       banner_bg_color: '#f59e0b',
-      banner_text_color: '#000000'
+      banner_text_color: '#000000',
+      is_popup: false,
+      popup_image_url: '',
+      popup_title: 'Special Offer!',
+      popup_description: 'Subscribe to our annual plan and get 20% off.',
+      popup_bullets: ['Unlimited campaigns', '24/7 Priority support', 'Full API access'],
+      popup_button_text: 'Get Started',
+      popup_button_url: '/plans'
     };
 
     const updatedSettings = await Setting.findOneAndUpdate({},
-      { $set: seedData },
+      { $setOnInsert: seedData },
       { upsert: true, returnDocument: 'after', runValidators: true }
     );
 

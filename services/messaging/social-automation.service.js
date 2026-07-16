@@ -187,6 +187,7 @@ class SocialAutomationService {
             let msgText = '';
             let fileUrl = '';
             let buttons = [];
+            let templateObj = null;
 
             const replyType = automation.reply_type;
             const replyId = automation.reply_id;
@@ -203,7 +204,8 @@ class SocialAutomationService {
                     }
                 }
             } else if (replyType === 'template') {
-                const template = await Template.findById(replyId).lean();
+                templateObj = await Template.findById(replyId).lean();
+                const template = templateObj;
                 if (template) {
                     if (template.template_type === 'carousel_media' || template.template_type === 'carousel') {
                         msgType = 'carousel';
@@ -326,7 +328,7 @@ class SocialAutomationService {
                             { instagram_scoped_id: senderId }
                         ],
                         user_id: userId
-                        
+
                     });
 
                     if (!contact && !senderId.startsWith('fb_comment_')) {
@@ -390,7 +392,8 @@ class SocialAutomationService {
                                 createdAt: newMessage.wa_timestamp,
                                 contact_id: contact._id.toString(),
                                 sender: { id: pageOrAccountId },
-                                recipient: { id: senderId }
+                                recipient: { id: senderId },
+                                template: templateObj || null
                             });
                         }
                     }
@@ -487,7 +490,7 @@ class SocialAutomationService {
             }
             if (automation.auto_like_comment && commentId && pageAccessToken) {
                 try {
-                    const baseUrl = 'https://graph.facebook.com';
+                    const baseUrl = pageAccessToken.startsWith('IGA') ? 'https://graph.instagram.com' : 'https://graph.facebook.com';
                     await axios.post(`${baseUrl}/${META_GRAPH_API_VERSION}/${commentId}/likes`, null, {
                         params: { access_token: pageAccessToken }
                     });
@@ -499,7 +502,7 @@ class SocialAutomationService {
 
             if (automation.auto_reply_text && commentId && pageAccessToken) {
                 try {
-                    const baseUrl = 'https://graph.facebook.com';
+                    const baseUrl = pageAccessToken.startsWith('IGA') ? 'https://graph.instagram.com' : 'https://graph.facebook.com';
                     const isInstagram = platform === 'instagram';
                     const replyEdge = isInstagram ? 'replies' : 'comments';
 
@@ -533,15 +536,20 @@ class SocialAutomationService {
                     }
                 }
             }
-        } else if (automation.hide_condition_type === 'chatbot' && automation.hide_chatbot_id && text) {
+        } else if (automation.hide_condition_type === 'aimodel' && text) {
             try {
-                const Chatbot = (await import('../../models/index.js')).Chatbot;
-                const chatbot = await Chatbot.findById(automation.hide_chatbot_id).populate('ai_model');
-                if (chatbot && chatbot.ai_model) {
-                    const systemPrompt = "Analyze this social media comment. If it contains hate speech, vulgarity, severe toxicity, highly inappropriate content, negativity, negative feedback, insults, spam, or complaints, reply strictly and only with the word 'yes'. If it is a normal, neutral, or positive comment, reply strictly and only with the word 'no'. Do not include any other words.";
-                    const aiResponse = await callAIModel(userId, chatbot.ai_model, chatbot.api_key, `${systemPrompt}\n\nComment to analyze: "${text}"`);
-                    if (aiResponse && aiResponse.toLowerCase().trim().startsWith('yes')) {
-                        shouldHide = true;
+                const { AIModel, UserSetting } = await import('../../models/index.js');
+                const { callAIModel } = await import('../../utils/ai-utils.js');
+                const userSettings = await UserSetting.findOne({ user_id: userId }).lean();
+                if (userSettings && userSettings.ai_model) {
+                    const aiModel = await AIModel.findById(userSettings.ai_model);
+                    if (aiModel) {
+                        const apiKey = userSettings.api_key || '';
+                        const systemPrompt = "Analyze this social media comment. If it contains hate speech, vulgarity, severe toxicity, highly inappropriate content, negativity, negative feedback, insults, spam, or complaints, reply strictly and only with the word 'yes'. If it is a normal, neutral, or positive comment, reply strictly and only with the word 'no'. Do not include any other words.";
+                        const aiResponse = await callAIModel(userId, aiModel, apiKey, `${systemPrompt}\n\nComment to analyze: "${text}"`);
+                        if (aiResponse && aiResponse.toLowerCase().trim().startsWith('yes')) {
+                            shouldHide = true;
+                        }
                     }
                 }
             } catch (err) {
@@ -552,7 +560,7 @@ class SocialAutomationService {
         if (shouldHide) {
             try {
                 const isInstagram = platform === 'instagram';
-                const baseUrl = 'https://graph.facebook.com';
+                const baseUrl = pageAccessToken.startsWith('IGA') ? 'https://graph.instagram.com' : 'https://graph.facebook.com';
                 const payload = isInstagram ? { hide: true } : { is_hidden: true };
 
                 await axios.post(`${baseUrl}/${META_GRAPH_API_VERSION}/${commentId}`, null, {

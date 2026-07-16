@@ -8,8 +8,7 @@ const replyMaterialSchema = new mongoose.Schema({
     },
     waba_id: {
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'WhatsappWaba',
-        required: true
+        ref: 'WhatsappWaba'
     },
     type: {
         type: String,

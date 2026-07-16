@@ -23,8 +23,7 @@ const chatAssignmentSchema = new mongoose.Schema({
     required: true
   },
   whatsapp_phone_number_id: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'WhatsappPhoneNumber',
+    type: String,
     required: true,
     index: true
   },

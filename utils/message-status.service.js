@@ -15,9 +15,7 @@ export const updateDeliveryStatus = async (messageId, status, timestamp = null, 
       updateData.delivered_at = timestamp || new Date();
     } else if (status === 'failed') {
       updateData.is_delivered = false;
-      if (failureReason) {
-        updateData['metadata.error'] = failureReason;
-      }
+      if (failureReason) updateData['metadata.error'] = failureReason;
     }
 
     const updatedMessage = await Message.findByIdAndUpdate(
@@ -96,6 +94,11 @@ export const updateWhatsAppStatus = async (waMessageId, status, timestamp = null
       wa_status_timestamp: timestamp || new Date()
     };
 
+    const existingMessage = await Message.findOne({ wa_message_id: waMessageId }).select('delivered_at').lean();
+    if (status === 'read' && existingMessage && !existingMessage.delivered_at) {
+      updateData.delivered_at = timestamp || new Date();
+    }
+
     switch (status) {
       case 'sent':
         updateData.delivery_status = 'sent';
@@ -109,13 +112,13 @@ export const updateWhatsAppStatus = async (waMessageId, status, timestamp = null
         updateData.read_status = 'read';
         updateData.is_seen = true;
         updateData.seen_at = timestamp || new Date();
+        updateData.delivery_status = 'delivered';
+        updateData.is_delivered = true;
         break;
       case 'failed':
         updateData.delivery_status = 'failed';
         updateData.is_delivered = false;
-        if (failureReason) {
-          updateData['metadata.error'] = failureReason;
-        }
+        if (failureReason) updateData['metadata.error'] = failureReason;
         break;
     }
 
