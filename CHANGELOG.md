@@ -1,5 +1,13 @@
 # Changelog
 
+## WAPI v3.2 custom upgrade - 2026-07-16
+
+- Upgrade the API to the complete WAPI v3.2 vendor release while retaining existing custom behavior.
+- Add recurring campaign scheduling, custom cron support, campaign batching, Google Forms, announcement support, snooze processing, and expanded integrations.
+- Preserve agent/team creation fixes, account credential emails, hard user deletion, campaign failure reporting, media validation, carousel upload mapping, and Meta template rollback.
+- Restore the purchased installation state omitted from the vendor archive.
+- Add the new v3.2 runtime dependencies and regenerate the dependency lockfile.
+
 ## Unreleased
 
 - Fix WhatsApp media campaign delivery by generating publicly reachable upload URLs, validating media against Meta's approved header type, and rolling back local template changes when Meta rejects an update.
