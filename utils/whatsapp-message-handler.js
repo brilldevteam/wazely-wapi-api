@@ -4,6 +4,8 @@ import path from 'path';
 import { promisify } from 'util';
 import { Setting } from '../models/index.js';
 import AWSStorage from './aws-storage.js';
+import ffmpegPath from 'ffmpeg-static';
+import { execFile } from 'child_process';
 const writeFile = promisify(fs.writeFile);
 
 
@@ -31,6 +33,12 @@ export function parseIncomingMessage(message) {
       mimeType = message.image.mime_type;
       content = message.image.caption || null;
       fileType = "image";
+      break;
+
+    case "sticker":
+      mediaId = message.sticker.id;
+      mimeType = message.sticker.mime_type;
+      fileType = "sticker";
       break;
 
     case "video":
@@ -218,9 +226,19 @@ export async function downloadAndStoreMedia(url, accessToken, mimeType, fileType
 }
 
 
-export async function saveBufferLocally(buffer, mimeType, fileType, userId = null) {
+export async function saveBufferLocally(buffer, mimeType, fileType, userId = null, originalName = null) {
   const ext = getExtension(mimeType);
-  const filename = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+  
+  let filename;
+  if (originalName && originalName !== 'null' && originalName !== 'undefined') {
+    const safeName = originalName.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    const nameWithoutExt = path.parse(safeName).name;
+    const cleanExt = path.parse(safeName).ext || `.${ext}`;
+    filename = `${nameWithoutExt}-${Date.now()}${cleanExt}`;
+  } else {
+    filename = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+  }
+  
   const safeType = fileType || 'other';
   const subfolder = `whatsapp/${safeType}`;
 
@@ -313,3 +331,55 @@ export async function handleCallPermissionGranted(contactNumber, phoneNumberId, 
     console.error('Error handling call permission grant:', error);
   }
 }
+
+export const convertAudioForMeta = async (inputPath) => {
+  let urlObj;
+  let isUrl = false;
+  try {
+    if (inputPath.startsWith('http')) {
+      urlObj = new URL(inputPath);
+      isUrl = true;
+    }
+  } catch(e) {}
+
+  const cleanPath = isUrl ? urlObj.pathname : inputPath;
+  const ext = path.extname(cleanPath).toLowerCase();
+  
+  if (['.m4a', '.mp4', '.mp3'].includes(ext)) {
+    return inputPath; // Already compatible
+  }
+
+  // Create a safe local output path in the uploads directory
+  const filename = path.basename(cleanPath, ext) + '-' + Date.now() + '.m4a';
+  const outputPath = path.join(process.cwd(), 'uploads', 'whatsapp', 'audio', filename);
+  
+  let ffmpegInputPath = inputPath;
+  if (!isUrl && ffmpegInputPath.startsWith('/uploads/')) {
+    ffmpegInputPath = path.join(process.cwd(), ffmpegInputPath.replace(/^\//, ''));
+  }
+  
+  return new Promise((resolve, reject) => {
+    const args = [
+      '-y',
+      '-i', ffmpegInputPath,
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      outputPath
+    ];
+
+    execFile(ffmpegPath, args, async (err) => {
+      if (err) {
+        console.error('[AudioConverter] Error converting audio:', err);
+        return resolve(inputPath); // Fallback to original
+      }
+      if (!isUrl) {
+        try {
+          await fs.promises.unlink(ffmpegInputPath);
+        } catch (e) {
+          console.error('[AudioConverter] Failed to delete original:', e);
+        }
+      }
+      resolve(`/uploads/whatsapp/audio/${filename}`);
+    });
+  });
+};

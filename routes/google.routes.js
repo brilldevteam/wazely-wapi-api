@@ -33,5 +33,13 @@ router.get('/sheets/:sheet_id', checkPermission('view.google_account'), googleCo
 router.post('/sheets/:sheet_id/values', checkPermission('update.google_account'), googleController.writeSheet);
 router.delete('/sheets/:id', checkPermission('delete.google_account'), googleController.deleteSheet);
 router.post('/sheets/bulk-delete', checkPermission('delete.google_account'), googleController.bulkDeleteSheets);
+router.get('/:google_account_id/forms', checkPermission('view.google_account'), googleController.listForms);
+router.post('/forms/sync', checkPermission('view.google_account'), googleController.syncForms);
+router.post('/accounts/:google_account_id/forms', checkPermission('create.google_account'), googleController.createForm);
+router.get('/forms/:form_id', checkPermission('view.google_account'), googleController.readForm);
+router.put('/forms/:form_id', checkPermission('update.google_account'), googleController.updateForm);
+router.get('/:form_id/responses', checkPermission('view.google_account'), googleController.readFormResponses);
+router.delete('/forms/:id', checkPermission('delete.google_account'), googleController.deleteForm);
+router.post('/forms/bulk-delete', checkPermission('delete.google_account'), googleController.bulkDeleteForms);
 
 export default router;

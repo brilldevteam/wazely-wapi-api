@@ -174,7 +174,12 @@ const getLandingPage = async (req, res) => {
           description: "Choose a plan that fits your business needs and start scaling your WhatsApp marketing with powerful automation and messaging tools.",
           subscribed_count: "45",
           subscribed_user: "avatar",
-          plans: []
+          plans: [],
+          tabs: [
+            { key: "monthly", value: "Monthly", badge: "" },
+            { key: "yearly", value: "Yearly", badge: "SAVE" },
+            { key: "lifetime", value: "One Time", badge: "" }
+          ]
         },
         testimonials_section: {
           title: "Hear What Our Satisfied Customers Said About Us",
@@ -213,7 +218,7 @@ const getLandingPage = async (req, res) => {
     const populatedLandingPage = await LandingPage.findById(landingPage._id)
       .populate({
         path: 'pricing_section.plans._id',
-        select: '_id name price features enabled_features is_featured billing_cycle',
+        select: '_id name price features is_featured billing_cycle',
         populate: {
           path: 'currency taxes',
         }
@@ -284,6 +289,9 @@ const updateLandingPage = async (req, res) => {
       if (pricing_section.description !== undefined) updateData['pricing_section.description'] = pricing_section.description;
       if (pricing_section.subscribed_count !== undefined) updateData['pricing_section.subscribed_count'] = pricing_section.subscribed_count;
       if (pricing_section.subscribed_user !== undefined) updateData['pricing_section.subscribed_user'] = pricing_section.subscribed_user;
+      if (pricing_section.tabs !== undefined && Array.isArray(pricing_section.tabs)) {
+        updateData['pricing_section.tabs'] = pricing_section.tabs;
+      }
     }
 
     if (testimonials_section) {
@@ -312,6 +320,7 @@ const updateLandingPage = async (req, res) => {
 
       if (faq_section.title !== undefined) updateData['faq_section.title'] = faq_section.title;
       if (faq_section.badge !== undefined) updateData['faq_section.badge'] = faq_section.badge;
+      if (faq_section.description !== undefined) updateData['faq_section.description'] = faq_section.description;
     }
 
     if (contact_section) {
@@ -343,7 +352,7 @@ const updateLandingPage = async (req, res) => {
       );
     }
     const updatedLandingPage = await LandingPage.findById(landingPage._id)
-      .populate('pricing_section.plans._id', '_id name price features enabled_features is_featured billing_cycle')
+      .populate('pricing_section.plans._id', '_id name price features is_featured billing_cycle')
       .populate('testimonials_section.testimonials._id')
       .populate('faq_section.faqs._id');
 

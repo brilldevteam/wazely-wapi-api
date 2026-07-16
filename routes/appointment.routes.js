@@ -27,7 +27,7 @@ router.post('/configs', checkPlanLimit('appointment_bookings'), checkPermission(
 router.get('/configs', checkPermission('view.appointment_booking'), getConfigs);
 router.get('/configs/:id', checkPermission('view.appointment_booking'), getConfigById);
 router.get('/configs/:id/bookings', checkPermission('view.appointment_booking'), getBookings);
-router.patch('/configs/:id', checkPermission('update.appointment_bookings'), updateConfig);
+router.patch('/configs/:id', checkPermission('update.appointment_booking'), updateConfig);
 router.patch('/configs/:id/templates', checkPermission('update.appointment_booking'), linkTemplates);
 router.delete('/configs/:id', checkPermission('delete.appointment_booking'), deleteConfig);
 

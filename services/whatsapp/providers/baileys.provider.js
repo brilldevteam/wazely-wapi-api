@@ -5,14 +5,20 @@ import {
     fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore,
     delay,
-    downloadContentFromMessage
+    downloadContentFromMessage,
+    generateWAMessageFromContent,
+    WAProto,
+    prepareWAMessageMedia
 } from 'baileys-pro';
 import QRCode from 'qrcode';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import BaseProvider from './base.provider.js';
-import { WhatsappWaba, Message, Contact, WhatsappPhoneNumber, WabaConfiguration, Template, Submission, EcommerceProduct } from '../../../models/index.js';
+import ffmpegPath from 'ffmpeg-static';
+import { execFile } from 'child_process';
+import os from 'os';
+import { WhatsappWaba, Message, Contact, WhatsappPhoneNumber, WabaConfiguration, Template, Submission, EcommerceProduct, ChatAssignment } from '../../../models/index.js';
 import pino from 'pino';
 import automationEngine from '../../../utils/automation-engine.js';
 import { updateWhatsAppStatus } from '../../../utils/message-status.service.js';
@@ -29,6 +35,47 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const recentlySentMessageIds = new Set();
+
+function transcodeToOggOpus(inputBuffer) {
+  return new Promise((resolve, reject) => {
+    const tempDir = os.tmpdir();
+    const inputPath = path.join(tempDir, `input_${Date.now()}_${Math.random().toString(36).slice(2)}.tmp`);
+    const outputPath = path.join(tempDir, `output_${Date.now()}_${Math.random().toString(36).slice(2)}.ogg`);
+
+    fs.writeFile(inputPath, inputBuffer, (err) => {
+      if (err) return reject(err);
+
+      const args = [
+        '-i', inputPath,
+        '-vn',
+        '-c:a', 'libopus',
+        '-b:a', '16k',
+        '-ac', '1',
+        '-ar', '16000',
+        '-y',
+        outputPath
+      ];
+
+      execFile(ffmpegPath, args, (execErr, stdout, stderr) => {
+        fs.unlink(inputPath, () => {});
+
+        if (execErr) {
+          fs.unlink(outputPath, () => {});
+          console.error('[Baileys] FFmpeg exec error:', execErr.message);
+          console.error('[Baileys] FFmpeg stderr:', stderr);
+          return reject(execErr);
+        }
+
+        fs.readFile(outputPath, (readErr, outputBuffer) => {
+          fs.unlink(outputPath, () => {});
+
+          if (readErr) return reject(readErr);
+          resolve(outputBuffer);
+        });
+      });
+    });
+  });
+}
 
 export default class BaileysProvider extends BaseProvider {
     constructor() {
@@ -272,6 +319,7 @@ export default class BaileysProvider extends BaseProvider {
                         const updatedMessage = await updateWhatsAppStatus(waMessageId, status, timestamp);
 
                         if (updatedMessage) {
+                            const wabaData = await WhatsappWaba.findById(wabaId).select('workspace_id').lean();
                             await automationEngine.triggerEvent("status_update", {
                                 waMessageId: waMessageId,
                                 status: status,
@@ -279,7 +327,7 @@ export default class BaileysProvider extends BaseProvider {
                                 recipientId: receipt.key.remoteJid,
                                 messageId: updatedMessage._id.toString(),
                                 userId: updatedMessage.user_id?.toString(),
-                                workspaceId: updatedMessage.workspace_id?.toString()
+                                workspaceId: wabaData?.workspace_id?.toString()
                             });
                         }
                     } catch (err) { }
@@ -303,6 +351,7 @@ export default class BaileysProvider extends BaseProvider {
                                 const timestamp = new Date();
                                 const updatedMessage = await updateWhatsAppStatus(waMessageId, status, timestamp);
                                 if (updatedMessage) {
+                                    const wabaData = await WhatsappWaba.findById(wabaId).select('workspace_id').lean();
                                     await automationEngine.triggerEvent("status_update", {
                                         waMessageId: waMessageId,
                                         status: status,
@@ -310,7 +359,7 @@ export default class BaileysProvider extends BaseProvider {
                                         recipientId: update.key.remoteJid,
                                         messageId: updatedMessage._id.toString(),
                                         userId: updatedMessage.user_id?.toString(),
-                                        workspaceId: updatedMessage.workspace_id?.toString()
+                                        workspaceId: wabaData?.workspace_id?.toString()
                                     });
                                 }
                             } catch (err) { }
@@ -433,9 +482,12 @@ export default class BaileysProvider extends BaseProvider {
                 created_by: userId,
                 $or: [
                     { phone_number: senderNumber },
+                    { whatsapp_username: senderNumber },
                     { 'metadata.whatsapp_lid': senderNumber }
                 ]
             });
+
+            const waUsername = msg.username || null;
 
             if (contact) {
                 if (contact.phone_number !== senderNumber && !senderJid.endsWith('@s.whatsapp.net')) {
@@ -443,20 +495,37 @@ export default class BaileysProvider extends BaseProvider {
                     senderNumber = contact.phone_number;
                 }
 
+                let needsSave = false;
+                if (waUsername && contact.whatsapp_username !== waUsername) {
+                    contact.whatsapp_username = waUsername;
+                    needsSave = true;
+                }
                 if (contact.deleted_at) {
                     contact.deleted_at = null;
+                    needsSave = true;
+                }
+                if (needsSave) {
                     await contact.save();
                 }
             } else {
                 const isLid = senderJid.endsWith('@lid');
-                contact = await Contact.create({
-                    phone_number: senderNumber,
+                const isPhone = /^\d+$/.test(senderNumber);
+                const contactFields = {
                     name: msg.pushName || senderNumber,
                     user_id: userId,
                     created_by: userId,
                     source: 'baileys',
                     metadata: isLid ? { whatsapp_lid: senderNumber } : {}
-                });
+                };
+                if (isPhone) {
+                    contactFields.phone_number = senderNumber;
+                } else {
+                    contactFields.whatsapp_username = senderNumber;
+                }
+                if (waUsername) {
+                    contactFields.whatsapp_username = waUsername;
+                }
+                contact = await Contact.create(contactFields);
                 console.log(`[Baileys DEBUG] Created new contact for ${senderNumber} (isLid: ${isLid})`);
             }
 
@@ -472,7 +541,7 @@ export default class BaileysProvider extends BaseProvider {
             }
 
             let fileUrl = null;
-            if (['image', 'video', 'audio', 'document'].includes(messageType)) {
+            if (['image', 'video', 'audio', 'document', 'sticker'].includes(messageType)) {
                 fileUrl = await this.downloadMedia(wabaId, unwrapped, messageType);
             }
 
@@ -499,10 +568,17 @@ export default class BaileysProvider extends BaseProvider {
                         address: unwrapped.locationMessage?.address
                     }
                 } : messageType === 'interactive' ? {
-                    type: unwrapped.buttonsResponseMessage ? 'button_reply' : 'list_reply',
+                    type: unwrapped.buttonsResponseMessage ? 'button_reply' : unwrapped.interactiveResponseMessage ? 'button_reply' : 'list_reply',
                     button_reply: unwrapped.buttonsResponseMessage ? {
                         id: unwrapped.buttonsResponseMessage.selectedButtonId,
                         title: unwrapped.buttonsResponseMessage.selectedDisplayText
+                    } : unwrapped.interactiveResponseMessage ? {
+                        id: (() => {
+                            try {
+                                return JSON.parse(unwrapped.interactiveResponseMessage.nativeFlowResponseMessage?.paramsJson || '{}').id;
+                            } catch(e) { return null; }
+                        })(),
+                        title: unwrapped.interactiveResponseMessage.nativeFlowResponseMessage?.name || 'quick_reply'
                     } : undefined,
                     list_reply: unwrapped.listResponseMessage ? {
                         id: unwrapped.listResponseMessage.singleSelectReply?.selectedRowId,
@@ -585,18 +661,58 @@ export default class BaileysProvider extends BaseProvider {
 
             if (!fromMe) {
                 try {
+                    let formData = null;
+                    if (unwrapped.interactiveResponseMessage?.nativeFlowResponseMessage) {
+                        const nfmName = unwrapped.interactiveResponseMessage.nativeFlowResponseMessage.name;
+                        if (nfmName === 'flow_message' || nfmName === 'flow' || nfmName === 'nfm_reply' || nfmName === 'review_and_pay' || unwrapped.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson) {
+                            try {
+                                const paramsObj = JSON.parse(unwrapped.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson || '{}');
+                                if (paramsObj.response_json) {
+                                    const fakeMessage = {
+                                        from: senderNumber,
+                                        interactive: {
+                                            type: 'nfm_reply',
+                                            nfm_reply: {
+                                                response_json: paramsObj.response_json,
+                                                flow_token: paramsObj.flow_token
+                                            }
+                                        }
+                                    };
+                                    
+                                    const { default: metaFlowService } = await import('../../meta-flow.service.js');
+                                    const submission = await metaFlowService.handleFlowSubmission(fakeMessage, phone, contact);
+                                    if (submission) {
+                                        messageDoc.submission_id = submission._id;
+                                        formData = submission.data;
+                                        await messageDoc.save();
+                                        console.log(`[Baileys Provider] Linked submission ${submission._id} to message ${messageDoc._id}`);
+                                    }
+                                }
+                            } catch (e) {
+                                console.error('Failed to parse baileys nativeFlow params:', e);
+                            }
+                        }
+                    }
+
+                    const wabaData = await WhatsappWaba.findById(wabaId).select('workspace_id').lean();
+                    const interactiveId = messageDoc.interactive_data?.button_reply?.id 
+                        || messageDoc.interactive_data?.list_reply?.id 
+                        || null;
+
                     await automationEngine.triggerEvent("message_received", {
                         platform: 'baileys',
-                        message: content,
+                        message: interactiveId || content,
+                        interactive_id: interactiveId,
+                        form_data: formData,
                         senderNumber: senderNumber,
                         recipientNumber: myNumber,
                         messageType: messageType,
                         userId: userId.toString(),
-                        workspaceId: phone?.workspace_id?.toString(),
+                        workspaceId: wabaData?.workspace_id?.toString(),
                         whatsappPhoneNumberId: phone?._id?.toString(),
                         waMessageId: msg.key.id,
                         waJid: senderJid,
-                        contactId: contact._id.toString(),
+                        contactId: contact?._id?.toString(),
                         timestamp: new Date(msg.messageTimestamp * 1000),
                     });
                 } catch (automationError) {
@@ -607,27 +723,88 @@ export default class BaileysProvider extends BaseProvider {
                     const config = await WabaConfiguration.findOne({ waba_id: wabaId });
 
                     contact.last_incoming_message_at = new Date();
+                    contact.snooze_count = 0;
+                    contact.is_snoozed = false;
                     if (!contact.user_id) {
                         contact.user_id = userId;
                     }
                     await contact.save();
 
                     let automatedHandled = false;
+                    let assignedChatbotId = null;
 
-                    const open = await isWithinWorkingHours(wabaId);
-                    console.log("open0", open, config)
-                    if (!open && config?.out_of_working_hours?.id) {
-                        await sendAutomatedReply({
-                            wabaId,
-                            contactId: contact._id,
-                            replyType: config.out_of_working_hours.type,
-                            replyId: config.out_of_working_hours.id,
-                            senderNumber: senderNumber,
-                            incomingText: content,
-                            userId: userId,
-                            whatsappPhoneNumberId: phone?._id
-                        });
-                        automatedHandled = true;
+                    const chatAssignment = await ChatAssignment.findOne({
+                        sender_number: senderNumber,
+                        whatsapp_phone_number_id: phone?._id,
+                        status: 'assigned',
+                        assigned_by: userId
+                    }).lean();
+
+                    if (chatAssignment && chatAssignment.chatbot_id) {
+                        const isExpired = chatAssignment.chatbot_expires_at && new Date() > new Date(chatAssignment.chatbot_expires_at);
+                        if (!isExpired) {
+                            assignedChatbotId = chatAssignment.chatbot_id;
+                        } else {
+                            console.log(`[Baileys] Chatbot assignment expired for ${senderNumber}`);
+                            await ChatAssignment.findByIdAndUpdate(chatAssignment._id, { chatbot_id: null, chatbot_expires_at: null });
+                        }
+                    } else if (contact.assigned_chatbot && !contact.chatbot_paused) {
+                        assignedChatbotId = contact.assigned_chatbot;
+                    }
+
+                    if (assignedChatbotId) {
+                        let finalContent = content;
+
+                        if (messageType === 'audio' && fileUrl) {
+                            const { default: Chatbot } = await import('../../../models/chatbot.model.js');
+                            const chatbot = await Chatbot.findById(assignedChatbotId).populate('ai_model').lean();
+                            if (chatbot && chatbot.voice_settings && chatbot.voice_settings.enabled) {
+                                const { transcribeAudio } = await import('../../../utils/voice-ai.service.js');
+                                console.log(`[Baileys] Transcribing incoming audio message...`);
+                                try {
+                                    const transcript = await transcribeAudio(fileUrl, chatbot.api_key, chatbot.ai_model);
+                                    if (transcript) {
+                                        finalContent = transcript;
+                                        console.log('[Baileys] Transcription successful:', transcript);
+                                    }
+                                } catch (err) {
+                                    console.error('[Baileys] Transcription failed:', err.message);
+                                }
+                            }
+                        }
+
+                        if (finalContent) {
+                            console.log(`[Baileys] Forwarding message to assigned chatbot ${assignedChatbotId}`);
+                            await sendAutomatedReply({
+                                wabaId,
+                                contactId: contact._id,
+                                replyType: 'chatbot',
+                                replyId: assignedChatbotId,
+                                senderNumber: senderNumber,
+                                incomingText: finalContent,
+                                userId: userId,
+                                whatsappPhoneNumberId: phone?._id
+                            });
+                            automatedHandled = true;
+                        }
+                    }
+
+                    if (!automatedHandled) {
+                        const open = await isWithinWorkingHours(wabaId);
+                        console.log("open0", open, config)
+                        if (!open && config?.out_of_working_hours?.id) {
+                            await sendAutomatedReply({
+                                wabaId,
+                                contactId: contact._id,
+                                replyType: config.out_of_working_hours.type,
+                                replyId: config.out_of_working_hours.id,
+                                senderNumber: senderNumber,
+                                incomingText: content,
+                                userId: userId,
+                                whatsappPhoneNumberId: phone?._id
+                            });
+                            automatedHandled = true;
+                        }
                     }
 
                     if (!automatedHandled) {
@@ -707,6 +884,7 @@ export default class BaileysProvider extends BaseProvider {
         const type = keys[0];
         if (type === 'conversation' || type === 'extendedTextMessage') return 'text';
         if (type === 'imageMessage') return 'image';
+        if (type === 'stickerMessage') return 'sticker';
         if (type === 'videoMessage') return 'video';
         if (type === 'audioMessage') return 'audio';
         if (type === 'documentMessage') return 'document';
@@ -714,6 +892,7 @@ export default class BaileysProvider extends BaseProvider {
         if (type === 'reactionMessage') return 'reaction';
         if (type === 'buttonsResponseMessage') return 'interactive';
         if (type === 'listResponseMessage') return 'interactive';
+        if (type === 'interactiveResponseMessage') return 'interactive';
         return 'text';
     }
 
@@ -721,6 +900,7 @@ export default class BaileysProvider extends BaseProvider {
         if (!message) return '';
         if (type === 'text') return message.conversation || message.extendedTextMessage?.text || '';
         if (type === 'image') return message.imageMessage?.caption || '';
+        if (type === 'sticker') return '';
         if (type === 'video') return message.videoMessage?.caption || '';
         if (type === 'document') return message.documentMessage?.caption || '';
         if (type === 'location') {
@@ -740,6 +920,11 @@ export default class BaileysProvider extends BaseProvider {
                 return message.listResponseMessage.title
                     || message.listResponseMessage.singleSelectReply?.selectedRowId
                     || '';
+            }
+            if (message.interactiveResponseMessage) {
+                try {
+                    return JSON.parse(message.interactiveResponseMessage.nativeFlowResponseMessage?.paramsJson || '{}').id || 'interactive';
+                } catch(e) { return 'interactive'; }
             }
             return '';
         }
@@ -775,7 +960,21 @@ export default class BaileysProvider extends BaseProvider {
             }
         }
         console.log(`Baileys sending message to ${recipientNumber}: type=${messageTypeInput}, mediaUrl=${mediaUrl}`);
-        const messageType = messageTypeInput || (mediaUrl ? this.getMediaTypeFromUrl(mediaUrl) : 'text');
+        
+        let messageType = messageTypeInput;
+        if (params.file && (messageType === 'media' || !messageType)) {
+            if (params.file.mimetype) {
+                if (params.file.mimetype.startsWith('image/')) messageType = 'image';
+                else if (params.file.mimetype.startsWith('video/')) messageType = 'video';
+                else if (params.file.mimetype.startsWith('audio/')) messageType = 'audio';
+                else messageType = 'document';
+            } else {
+                messageType = 'document';
+            }
+        } else if (!messageType) {
+            messageType = mediaUrl ? this.getMediaTypeFromUrl(mediaUrl) : 'text';
+        }
+
         let jid = `${recipientNumber}@s.whatsapp.net`;
         if (recipientNumber && recipientNumber.length >= 14) {
             jid = `${recipientNumber}@lid`;
@@ -788,8 +987,68 @@ export default class BaileysProvider extends BaseProvider {
         }
 
         let result;
+        let mediaContent = null;
+        if (params.file) {
+            if (Buffer.isBuffer(params.file)) {
+                mediaContent = params.file;
+            } else if (params.file.buffer && Buffer.isBuffer(params.file.buffer)) {
+                mediaContent = params.file.buffer;
+            }
+
+            if (mediaContent && messageType === 'audio') {
+                try {
+                    console.log('[Baileys] Transcoding audio buffer to valid OGG/Opus using ffmpeg...');
+                    const startTime = Date.now();
+                    mediaContent = await transcodeToOggOpus(mediaContent);
+                    console.log(`[Baileys] Transcoding completed in ${Date.now() - startTime}ms. New buffer size: ${mediaContent.length} bytes.`);
+                    
+                    if (params.file.buffer) {
+                        params.file.buffer = mediaContent;
+                    } else {
+                        params.file = mediaContent;
+                    }
+                    params.file.mimetype = 'audio/ogg; codecs=opus';
+                    if (params.file.originalname && !params.file.originalname.endsWith('.ogg')) {
+                        params.file.originalname = params.file.originalname.substring(0, params.file.originalname.lastIndexOf('.')) + '.ogg';
+                    } else if (!params.file.originalname) {
+                        params.file.originalname = 'audio_message.ogg';
+                    }
+                } catch (transcodeErr) {
+                    console.error('[Baileys] Failed to transcode audio file:', transcodeErr.message);
+                }
+            }
+
+            if (mediaContent) {
+                try {
+                    const { saveBufferLocally } = await import('../../../utils/whatsapp-message-handler.js');
+                    const fileMimetype = params.file.mimetype || 'image/jpeg';
+                    const fileOriginalname = params.file.originalname || 'file';
+                    const savedPath = await saveBufferLocally(mediaContent, fileMimetype, messageType, userId, fileOriginalname);
+                    if (savedPath) {
+                        mediaUrl = savedPath;
+                        if (mediaUrl.startsWith('/uploads') || mediaUrl.startsWith('uploads')) {
+                            const relativePath = mediaUrl.startsWith('/') ? mediaUrl.slice(1) : mediaUrl;
+                            const absolutePath = path.join(process.cwd(), relativePath);
+                            if (fs.existsSync(absolutePath)) {
+                                mediaUrl = absolutePath;
+                            }
+                        }
+                    }
+                } catch (saveErr) {
+                    console.error('[Baileys] Error saving uploaded file buffer:', saveErr);
+                }
+            }
+        }
+
         const isUrl = mediaUrl && mediaUrl.startsWith('http');
         const isLocalFile = mediaUrl && !isUrl && (mediaUrl.includes('/') || mediaUrl.includes('\\')) && fs.existsSync(mediaUrl);
+
+        let mediaPayload = null;
+        if (isUrl || isLocalFile) {
+            mediaPayload = { url: mediaUrl };
+        } else if (mediaContent) {
+            mediaPayload = mediaContent;
+        }
 
         const sendOptions = {};
         if (params.replyMessageId) {
@@ -803,20 +1062,25 @@ export default class BaileysProvider extends BaseProvider {
             };
         }
 
-        if (messageType === 'text' || (!isUrl && !isLocalFile && mediaUrl)) {
-            const textToSend = messageText || (mediaUrl && !isUrl && !isLocalFile ? mediaUrl : '');
+        if (messageType === 'text' || (!mediaPayload && messageType !== 'location' && messageType !== 'reaction' && messageType !== 'template' && messageType !== 'interactive')) {
+            const textToSend = messageText || (mediaUrl && !mediaPayload ? mediaUrl : '');
             result = await sock.sendMessage(jid, { text: textToSend }, sendOptions);
         } else if (messageType === 'image') {
-            result = await sock.sendMessage(jid, { image: { url: mediaUrl }, caption: messageText }, sendOptions);
+            result = await sock.sendMessage(jid, { image: mediaPayload, caption: messageText }, sendOptions);
         } else if (messageType === 'video') {
-            result = await sock.sendMessage(jid, { video: { url: mediaUrl }, caption: messageText }, sendOptions);
+            result = await sock.sendMessage(jid, { video: mediaPayload, caption: messageText }, sendOptions);
         } else if (messageType === 'audio') {
-            result = await sock.sendMessage(jid, { audio: { url: mediaUrl }, mimetype: 'audio/mp4' }, sendOptions);
+            const isPtt = params.isVoiceNote || (params.file?.mimetype && (params.file.mimetype.includes('audio/ogg') || params.file.mimetype.includes('audio/webm') || params.file.mimetype.includes('audio/mpeg') || params.file.originalname?.endsWith('.ogg') || params.file.originalname?.endsWith('.mp3')));
+            result = await sock.sendMessage(jid, { 
+                audio: mediaPayload, 
+                mimetype: params.file?.mimetype || 'audio/ogg; codecs=opus', 
+                ptt: isPtt 
+            }, sendOptions);
         } else if (messageType === 'document') {
-            const fileName = this.getFileNameFromUrl(mediaUrl);
-            result = await sock.sendMessage(jid, { document: { url: mediaUrl }, fileName: fileName, caption: messageText }, sendOptions);
+            const fileName = params.file?.originalname || this.getFileNameFromUrl(mediaUrl) || 'document';
+            result = await sock.sendMessage(jid, { document: mediaPayload, fileName: fileName, caption: messageText }, sendOptions);
         } else if (messageType === 'sticker') {
-            result = await sock.sendMessage(jid, { sticker: { url: mediaUrl } }, sendOptions);
+            result = await sock.sendMessage(jid, { sticker: mediaPayload }, sendOptions);
         } else if (messageType === 'location') {
             const { locationParams } = params;
             if (locationParams) {
@@ -873,6 +1137,10 @@ export default class BaileysProvider extends BaseProvider {
                         bodyParams = paramsList.map(p => p.text);
                     } else if (compType === 'header') {
                         headerParams = paramsList.map(p => {
+                            if (p._uploadedFile) {
+                                headerMediaType = p.type;
+                                return p._uploadedFile;
+                            }
                             if (p.type === 'text') return p.text;
                             if (p.type === 'image') return p.image?.link || p.image?.url;
                             if (p.type === 'video') return p.video?.link || p.video?.url;
@@ -907,14 +1175,23 @@ export default class BaileysProvider extends BaseProvider {
                 bodyText = bodyText.replace(new RegExp(`\\{\\{${idx + 1}\\}\\}`, 'g'), String(val));
             });
 
+            let headerFileContent = null;
             headerParams.forEach((val, idx) => {
-                const placeholder = `{{${idx + 1}}}`;
-                if (headerMediaType) {
-                    if (typeof val === 'string' && val.startsWith('http')) {
-                        headerMediaUrl = val;
+                if (val && typeof val === 'object') {
+                    if (Buffer.isBuffer(val)) {
+                        headerFileContent = val;
+                    } else if (val.buffer && Buffer.isBuffer(val.buffer)) {
+                        headerFileContent = val.buffer;
                     }
                 } else {
-                    headerText = headerText.replace(new RegExp(`\\{\\{${idx + 1}\\}\\}`, 'g'), String(val));
+                    const placeholder = `{{${idx + 1}}}`;
+                    if (headerMediaType) {
+                        if (typeof val === 'string' && val.startsWith('http')) {
+                            headerMediaUrl = val;
+                        }
+                    } else {
+                        headerText = headerText.replace(new RegExp(`\\{\\{${idx + 1}\\}\\}`, 'g'), String(val));
+                    }
                 }
             });
 
@@ -1000,12 +1277,22 @@ export default class BaileysProvider extends BaseProvider {
 
                     const paramHeader = resolvedCard?.components?.find(c => c.type?.toLowerCase() === 'header');
                     const paramMedia = paramHeader?.parameters?.[0];
+                    let cardMediaPayload = null;
                     if (paramMedia) {
                         mediaType = paramMedia.type || 'image';
-                        mediaUrl = paramMedia[mediaType]?.link || paramMedia[mediaType]?.url || '';
+                        if (paramMedia._uploadedFile) {
+                            const fileObj = paramMedia._uploadedFile;
+                            if (Buffer.isBuffer(fileObj)) {
+                                cardMediaPayload = fileObj;
+                            } else if (fileObj.buffer && Buffer.isBuffer(fileObj.buffer)) {
+                                cardMediaPayload = fileObj.buffer;
+                            }
+                        } else {
+                            mediaUrl = paramMedia[mediaType]?.link || paramMedia[mediaType]?.url || '';
+                        }
                     }
 
-                    if (!mediaUrl) {
+                    if (!mediaUrl && !cardMediaPayload) {
                         const staticHeader = tCard.components?.find(c => c.type?.toLowerCase() === 'header');
                         if (staticHeader) {
                             mediaUrl = staticHeader.media_url || '';
@@ -1013,7 +1300,7 @@ export default class BaileysProvider extends BaseProvider {
                         }
                     }
 
-                    if (mediaUrl && !mediaUrl.startsWith('http')) {
+                    if (mediaUrl && !mediaUrl.startsWith('http') && !cardMediaPayload) {
                         if (mediaUrl.startsWith('/uploads') || mediaUrl.startsWith('uploads')) {
                             const relativePath = mediaUrl.startsWith('/') ? mediaUrl.slice(1) : mediaUrl;
                             const absolutePath = path.join(process.cwd(), relativePath);
@@ -1021,6 +1308,10 @@ export default class BaileysProvider extends BaseProvider {
                                 mediaUrl = absolutePath;
                             }
                         }
+                    }
+
+                    if (!cardMediaPayload) {
+                        cardMediaPayload = { url: mediaUrl || '' };
                     }
 
                     const cardObj = {
@@ -1073,9 +1364,9 @@ export default class BaileysProvider extends BaseProvider {
                     }
 
                     if (mediaType === 'video') {
-                        cardObj.video = { url: mediaUrl };
+                        cardObj.video = cardMediaPayload;
                     } else {
-                        cardObj.image = { url: mediaUrl };
+                        cardObj.image = cardMediaPayload;
                     }
 
                     return cardObj;
@@ -1093,25 +1384,67 @@ export default class BaileysProvider extends BaseProvider {
                 console.log('[Baileys DEBUG] Dispatching Carousel message payload:', JSON.stringify(messagePayload));
                 result = await sock.sendMessage(jid, messagePayload, sendOptions);
             } else {
-                let messagePayload = {};
-                if (headerMediaUrl && headerMediaType) {
-                    messagePayload = {
-                        [headerMediaType]: { url: headerMediaUrl },
-                        caption: bodyText,
-                        title: headerText || undefined,
-                        footer: footerText || undefined,
-                        media: true
+                let headerMediaPayload = null;
+                if (headerFileContent) {
+                    headerMediaPayload = headerFileContent;
+                } else if (headerMediaUrl) {
+                    headerMediaPayload = { url: headerMediaUrl };
+                }
+
+                if (interactiveButtons.length > 0) {
+                    const interactiveMessage = {
+                        body: { text: bodyText || ' ' },
+                        footer: { text: footerText || ' ' },
+                        header: { title: headerText || '', subtitle: '', hasMediaAttachment: false },
+                        nativeFlowMessage: {
+                            buttons: interactiveButtons,
+                            messageVersion: 1
+                        }
                     };
-                    if (interactiveButtons.length > 0) {
-                        messagePayload.interactiveButtons = interactiveButtons;
+
+                    if (headerMediaPayload && headerMediaType) {
+                        interactiveMessage.header.hasMediaAttachment = true;
+                        try {
+                            const mediaMsg = await prepareWAMessageMedia(
+                                { [headerMediaType]: headerMediaPayload },
+                                { upload: sock.waUploadToServer }
+                            );
+                            
+                            const msgKey = headerMediaType + 'Message';
+                            if (mediaMsg && mediaMsg[msgKey]) {
+                                interactiveMessage.header[msgKey] = mediaMsg[msgKey];
+                            }
+                        } catch (mediaErr) {
+                            console.error('[Baileys] Error preparing interactive media header:', mediaErr);
+                        }
                     }
+
+                    const msg = generateWAMessageFromContent(jid, {
+                        viewOnceMessage: {
+                            message: {
+                                messageContextInfo: {
+                                    deviceListMetadata: {},
+                                    deviceListMetadataVersion: 2
+                                },
+                                interactiveMessage
+                            }
+                        }
+                    }, { userJid: sock.user?.id, quoted: sendOptions.quoted });
+
+                    await sock.relayMessage(jid, msg.message, { messageId: msg.key.id });
+                    result = msg;
                 } else {
-                    if (interactiveButtons.length > 0) {
+                    let messagePayload = {};
+                    if (headerMediaPayload && headerMediaType) {
+                        let finalCaption = '';
+                        if (headerText) finalCaption += `*${headerText}*\n\n`;
+                        finalCaption += bodyText;
+                        if (footerText) finalCaption += `\n\n_${footerText}_`;
+                        
                         messagePayload = {
-                            text: bodyText,
-                            title: headerText || undefined,
-                            footer: footerText || undefined,
-                            interactiveButtons: interactiveButtons
+                            [headerMediaType]: headerMediaPayload,
+                            caption: finalCaption,
+                            media: true
                         };
                     } else {
                         let fullText = '';
@@ -1120,35 +1453,68 @@ export default class BaileysProvider extends BaseProvider {
                         if (footerText) fullText += `\n\n_${footerText}_`;
                         messagePayload = { text: fullText };
                     }
-                }
 
-                console.log('[Baileys DEBUG] Dispatching Template message payload:', JSON.stringify(messagePayload));
-                result = await sock.sendMessage(jid, messagePayload, sendOptions);
+                    console.log('[Baileys DEBUG] Dispatching Template message payload (no buttons):', JSON.stringify(messagePayload));
+                    result = await sock.sendMessage(jid, messagePayload, sendOptions);
+                }
             }
         } else if (messageType === 'interactive') {
             const { interactiveType, buttonParams, listParams } = params;
 
             if (interactiveType === 'button') {
                 const buttons = (buttonParams || []).map((btn, i) => ({
-                    buttonId: btn.id || `btn_${i}`,
-                    buttonText: { displayText: btn.title },
-                    type: 1
+                    name: 'quick_reply',
+                    buttonParamsJson: JSON.stringify({
+                        display_text: btn.title || btn.displayText || btn.text || '',
+                        id: btn.id || btn.buttonId || btn.payload || `btn_${i}`
+                    })
                 }));
 
-                const buttonMessage = {
-                    text: messageText || 'Please select an option',
-                    footer: params.footerText || '',
-                    buttons: buttons,
-                    headerType: 1,
-                    viewOnce: true
+                const interactiveMessage = {
+                    body: { text: messageText || 'Please select an option' },
+                    footer: { text: params.footerText || ' ' },
+                    header: { title: params.headerText || '', subtitle: '', hasMediaAttachment: false },
+                    nativeFlowMessage: {
+                        buttons: buttons,
+                        messageVersion: 1
+                    }
                 };
 
-                if (mediaUrl) {
-                    buttonMessage.image = { url: mediaUrl };
-                    buttonMessage.headerType = 4;
+                if (mediaUrl || mediaPayload) {
+                    interactiveMessage.header.hasMediaAttachment = true;
+                    try {
+                        const resolvedMediaType = params.file?.mimetype?.startsWith('video/') ? 'video' :
+                                                  params.file?.mimetype?.startsWith('audio/') ? 'audio' :
+                                                  params.file?.mimetype?.startsWith('image/') ? 'image' : 'document';
+                        
+                        const mediaMsg = await prepareWAMessageMedia(
+                            { [resolvedMediaType]: mediaPayload || { url: mediaUrl } },
+                            { upload: sock.waUploadToServer }
+                        );
+                        
+                        const msgKey = resolvedMediaType + 'Message';
+                        if (mediaMsg && mediaMsg[msgKey]) {
+                            interactiveMessage.header[msgKey] = mediaMsg[msgKey];
+                        }
+                    } catch (mediaErr) {
+                        console.error('[Baileys] Error preparing interactive media header:', mediaErr);
+                    }
                 }
 
-                result = await sock.sendMessage(jid, buttonMessage, sendOptions);
+                const msg = generateWAMessageFromContent(jid, {
+                    viewOnceMessage: {
+                        message: {
+                            messageContextInfo: {
+                                deviceListMetadata: {},
+                                deviceListMetadataVersion: 2
+                            },
+                            interactiveMessage
+                        }
+                    }
+                }, { userJid: sock.user?.id, quoted: sendOptions.quoted });
+
+                await sock.relayMessage(jid, msg.message, { messageId: msg.key.id });
+                result = msg;
             } else if (interactiveType === 'list') {
                 let sections;
                 if (listParams?.sections && Array.isArray(listParams.sections)) {
@@ -1182,6 +1548,65 @@ export default class BaileysProvider extends BaseProvider {
                 };
 
                 result = await sock.sendMessage(jid, listMessage, sendOptions);
+            } else if (interactiveType === 'cta_url') {
+                const btnDisplay = buttonParams?.display_text || buttonParams?.text || 'View';
+                const btnUrl = buttonParams?.url || '';
+                
+                const buttons = [
+                    {
+                        name: 'cta_url',
+                        buttonParamsJson: JSON.stringify({
+                            display_text: btnDisplay,
+                            url: btnUrl
+                        })
+                    }
+                ];
+
+                const interactiveMessage = {
+                    body: { text: messageText || 'Please select an option' },
+                    footer: { text: params.footerText || ' ' },
+                    header: { title: params.headerText || '', subtitle: '', hasMediaAttachment: false },
+                    nativeFlowMessage: {
+                        buttons: buttons,
+                        messageVersion: 1
+                    }
+                };
+
+                if (mediaUrl || mediaPayload) {
+                    interactiveMessage.header.hasMediaAttachment = true;
+                    try {
+                        const resolvedMediaType = params.file?.mimetype?.startsWith('video/') ? 'video' :
+                                                  params.file?.mimetype?.startsWith('audio/') ? 'audio' :
+                                                  params.file?.mimetype?.startsWith('image/') ? 'image' : 'document';
+                        
+                        const mediaMsg = await prepareWAMessageMedia(
+                            { [resolvedMediaType]: mediaPayload || { url: mediaUrl } },
+                            { upload: sock.waUploadToServer }
+                        );
+                        
+                        const msgKey = resolvedMediaType + 'Message';
+                        if (mediaMsg && mediaMsg[msgKey]) {
+                            interactiveMessage.header[msgKey] = mediaMsg[msgKey];
+                        }
+                    } catch (mediaErr) {
+                        console.error('[Baileys] Error preparing interactive media header:', mediaErr);
+                    }
+                }
+
+                const msg = generateWAMessageFromContent(jid, {
+                    viewOnceMessage: {
+                        message: {
+                            messageContextInfo: {
+                                deviceListMetadata: {},
+                                deviceListMetadataVersion: 2
+                            },
+                            interactiveMessage
+                        }
+                    }
+                }, { userJid: sock.user?.id, quoted: sendOptions.quoted });
+
+                await sock.relayMessage(jid, msg.message, { messageId: msg.key.id });
+                result = msg;
             }
         }
 
@@ -1233,7 +1658,7 @@ export default class BaileysProvider extends BaseProvider {
                 location: params.locationParams
             } : messageType === 'interactive' ? {
                 interactiveType: params.interactiveType,
-                buttons: params.interactiveType === 'button' ? params.buttonParams : undefined,
+                buttons: (params.interactiveType === 'button' || params.interactiveType === 'cta_url') ? (params.buttonParams || params.buttons) : undefined,
                 list: params.interactiveType === 'list' ? params.listParams : undefined
             } : null,
             reply_message_id: params.replyMessageId || null,
@@ -1324,6 +1749,7 @@ export default class BaileysProvider extends BaseProvider {
                 { sender_number: myNumber },
                 { recipient_number: myNumber }
             ],
+            message_type: { $ne: 'reaction' },
             deleted_at: null
         };
 
@@ -1373,27 +1799,32 @@ export default class BaileysProvider extends BaseProvider {
             return acc;
         }, {});
 
-        const formattedChats = chatsData.map(chat => ({
-            contact: {
-                id: contactMap[chat._id]?._id || null,
-                number: chat._id,
-                name: contactMap[chat._id]?.name || chat._id,
-                avatar: null,
-                chat_status: contactMap[chat._id]?.chat_status || 'open'
-            },
-            is_pinned: contactMap[chat._id]?.is_pinned || false,
-            lastMessage: chat.lastMessage ? {
-                id: chat.lastMessage._id.toString(),
-                content: chat.lastMessage.content,
-                messageType: chat.lastMessage.message_type,
-                fileUrl: chat.lastMessage.file_url,
-                direction: chat.lastMessage.direction,
-                fromMe: chat.lastMessage.from_me,
-                createdAt: chat.lastMessage.wa_timestamp,
-                is_seen: chat.lastMessage.is_seen || false,
-                read_status: chat.lastMessage.read_status || 'unread'
-            } : null
-        }));
+        const formattedChats = chatsData.map(chat => {
+            const contactInfo = contactMap[chat._id];
+            if (!contactInfo) return null;
+
+            return {
+                contact: {
+                    id: contactInfo._id || null,
+                    number: chat._id,
+                    name: contactInfo.name || chat._id,
+                    avatar: null,
+                    chat_status: contactInfo.chat_status || 'open'
+                },
+                is_pinned: contactInfo.is_pinned || false,
+                lastMessage: chat.lastMessage ? {
+                    id: chat.lastMessage._id.toString(),
+                    content: chat.lastMessage.content,
+                    messageType: chat.lastMessage.message_type,
+                    fileUrl: chat.lastMessage.file_url,
+                    direction: chat.lastMessage.direction,
+                    fromMe: chat.lastMessage.from_me,
+                    createdAt: chat.lastMessage.wa_timestamp,
+                    is_seen: chat.lastMessage.is_seen || false,
+                    read_status: chat.lastMessage.read_status || 'unread'
+                } : null
+            };
+        }).filter(Boolean);
 
         return {
             data: formattedChats,

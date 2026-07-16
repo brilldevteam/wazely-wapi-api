@@ -22,6 +22,7 @@ router.put('/:id', uploader('attachments').fields([{ name: 'file', maxCount: 1 }
 router.delete('/:id', checkPermission('delete.template'), templateController.deleteTemplate);
 router.post('/migrate', checkPermission('update.template'), templateController.migrateTemplate);
 router.get('/admin-templates/list', checkPermission('view.template'), templateController.getAdminTemplatesForUsers);
+router.post('/:id/publish', checkPermission('update.template'), templateController.publishTemplate);
 
 export default router;
 

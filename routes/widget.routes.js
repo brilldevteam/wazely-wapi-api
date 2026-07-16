@@ -11,6 +11,8 @@ const widgetUpload = uploader('widgets').fields([
     { name: 'body_background_image', maxCount: 1 },
 ]);
 
+router.get('/:id', widgetController.getWidgetById);
+
 router.post('/', authenticate, ...widgetUpload, checkPermission('create.widget'), widgetController.createWidget);
 router.put('/:id', authenticate, ...widgetUpload, checkPermission('update.widget'), widgetController.updateWidget);
 router.delete('/:id', authenticate, checkPermission('delete.widget'), widgetController.deleteWidget);

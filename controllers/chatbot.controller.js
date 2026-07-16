@@ -2,14 +2,22 @@ import { Chatbot, AIModel } from '../models/index.js';
 import mongoose from 'mongoose';
 import axios from 'axios';
 import fs from 'fs';
+import puppeteer from 'puppeteer';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
+if (typeof global.DOMMatrix === 'undefined') {
+    global.DOMMatrix = class DOMMatrix {};
+}
 const pdf = require('pdf-parse');
 
 const buildSystemPrompt = (data) => {
-    const { business_name, business_description, training_data, raw_training_text } = data;
+    const { business_name, business_description, training_data, raw_training_text, tone } = data;
 
     let prompt = `You are an AI assistant for ${business_name || 'our business'}.\n`;
+    
+    if (tone) {
+        prompt += `\nYour communication tone must be: ${tone}.\n`;
+    }
 
     if (business_description) {
         prompt += `\nBusiness Description:\n${business_description}\n`;
@@ -34,7 +42,7 @@ const buildSystemPrompt = (data) => {
 export const createChatbot = async (req, res) => {
     try {
         const userId = req.user.owner_id;
-        const { name, ai_model, api_key, business_name, business_description } = req.body;
+        const { name, ai_model, api_key, business_name, business_description, enable_human_handoff, message_limit, enable_google_meet, voice_settings, handoff_keywords, handoff_message, tone } = req.body;
 
         if (!name || !ai_model || !api_key) {
             return res.status(400).json({ success: false, message: 'name, ai_model, and api_key are required' });
@@ -48,7 +56,7 @@ export const createChatbot = async (req, res) => {
             });
         }
 
-        const system_prompt = buildSystemPrompt({ business_name, business_description });
+        const system_prompt = buildSystemPrompt({ business_name, business_description, tone });
 
         const chatbot = await Chatbot.create({
             user_id: req.user.owner_id,
@@ -58,7 +66,14 @@ export const createChatbot = async (req, res) => {
             api_key,
             business_name,
             business_description,
-            system_prompt
+            system_prompt,
+            enable_human_handoff,
+            message_limit,
+            enable_google_meet,
+            voice_settings,
+            handoff_keywords,
+            handoff_message,
+            tone
         });
 
         return res.status(201).json({
@@ -153,7 +168,7 @@ export const updateChatbot = async (req, res) => {
             });
         }
 
-        const allowedUpdates = ['name', 'ai_model', 'api_key', 'status'];
+        const allowedUpdates = ['name', 'ai_model', 'api_key', 'status', 'enable_human_handoff', 'message_limit', 'enable_google_meet', 'voice_settings', 'handoff_keywords', 'handoff_message', 'tone'];
         allowedUpdates.forEach(field => {
             if (updateData[field] !== undefined) {
                 chatbot[field] = updateData[field];
@@ -207,7 +222,7 @@ export const trainChatbot = async (req, res) => {
     try {
         const { id } = req.params;
         const userId = req.user.owner_id;
-        const { business_name, business_description, training_data, raw_training_text, knowledgeType } = req.body;
+        const { business_name, business_description, training_data, raw_training_text, knowledgeType, tone } = req.body;
 
         const chatbot = await Chatbot.findOne({ _id: id, user_id: userId, deleted_at: null });
 
@@ -221,6 +236,7 @@ export const trainChatbot = async (req, res) => {
         if (business_name !== undefined) chatbot.business_name = business_name;
         if (business_description !== undefined) chatbot.business_description = business_description;
         if (knowledgeType !== undefined) chatbot.knowledge_type = knowledgeType;
+        if (tone !== undefined) chatbot.tone = tone;
 
         if (knowledgeType === 'q&a') {
             if (training_data !== undefined) chatbot.training_data = training_data;
@@ -260,38 +276,33 @@ export const scrapeUrl = async (req, res) => {
             return res.status(400).json({ success: false, message: 'URL is required' });
         }
 
-        const response = await axios.get(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            },
-            timeout: 15000
+        const browser = await puppeteer.launch({
+            headless: 'new',
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
         });
-
-        let html = response.data;
-        if (typeof html !== 'string') {
-            return res.status(400).json({ success: false, message: 'Invalid page response' });
+        
+        const page = await browser.newPage();
+        
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        
+        try {
+            await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+        } catch (navError) {
+            console.error('Puppeteer navigation error:', navError);
         }
 
-        html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
-        html = html.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
-        html = html.replace(/<!--[\s\S]*?-->/g, '');
+        let text = await page.evaluate(() => {
+            const elementsToRemove = document.querySelectorAll('nav, header, footer, script, style, noscript, iframe');
+            elementsToRemove.forEach(el => el.remove());
+            
+            return document.body ? document.body.innerText : '';
+        });
+        
+        await browser.close();
 
-        const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
-        let bodyHtml = bodyMatch ? bodyMatch[1] : html;
-
-        bodyHtml = bodyHtml.replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, '');
-        bodyHtml = bodyHtml.replace(/<header[^>]*>[\s\S]*?<\/header>/gi, '');
-        bodyHtml = bodyHtml.replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, '');
-
-        let text = bodyHtml.replace(/<[^>]*>/g, ' ');
-
-        text = text
-            .replace(/&nbsp;/g, ' ')
-            .replace(/&amp;/g, '&')
-            .replace(/&lt;/g, '<')
-            .replace(/&gt;/g, '>')
-            .replace(/&quot;/g, '"')
-            .replace(/&#39;/g, "'");
+        if (!text) {
+             return res.status(400).json({ success: false, message: 'Could not extract text from the provided URL. The page might be empty or blocking scrapers.' });
+        }
 
         text = text.replace(/\s+/g, ' ').trim();
 

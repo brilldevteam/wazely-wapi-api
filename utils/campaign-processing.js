@@ -36,6 +36,12 @@ const resolveVariablesForContact = (mapping, contact) => {
           if (val != null) resolved = String(val);
         }
       }
+      
+      if (!resolved || resolved.trim() === '') {
+        const lowerField = fieldName.toLowerCase();
+        resolved = lowerField.includes('name') ? 'Customer' : 'N/A';
+      }
+
       result[key] = resolved;
     } else {
       result[key] = value;
@@ -56,12 +62,15 @@ export const processCampaignInBackground = async (campaignOrId) => {
     const campaign = await Campaign.findOneAndUpdate(
       {
         _id: campaignId,
-        status: { $in: ['draft', 'scheduled'] }
+        $or: [
+          { status: { $in: ['draft', 'scheduled'] } },
+          { status: 'sending', is_paused: true }
+        ]
       },
       {
         $set: {
           status: 'sending',
-          sent_at: new Date()
+          is_paused: false
         }
       },
       { new: true }
@@ -71,6 +80,13 @@ export const processCampaignInBackground = async (campaignOrId) => {
       console.log(`[Campaign processing] Campaign ${campaignId} is already in sending or completed state. Skipping.`);
       return;
     }
+
+    if (!campaign.sent_at) {
+      campaign.sent_at = new Date();
+      await Campaign.updateOne({ _id: campaignId }, { $set: { sent_at: campaign.sent_at } });
+    }
+
+
 
     if (campaign.platform === 'whatsapp') {
       const waba = await WhatsappWaba.findById(campaign.waba_id);
@@ -113,11 +129,40 @@ export const processCampaignInBackground = async (campaignOrId) => {
       }
     }
 
+    const totalRecipients = campaign.recipients.length;
+    const pendingCount = campaign.recipients.filter(r => r.status === 'pending').length;
+    const sentCount = campaign.recipients.filter(r => r.status === 'sent' || r.status === 'delivered' || r.status === 'read').length;
+    const failedCount = campaign.recipients.filter(r => r.status === 'failed').length;
+
+    await Campaign.updateOne(
+      { _id: campaignId },
+      {
+        $set: {
+          'stats.total_recipients': totalRecipients,
+          'stats.pending_count': pendingCount,
+          'stats.sent_count': sentCount,
+          'stats.failed_count': failedCount
+        }
+      }
+    );
+
     const { campaignQueue } = await getQueueSystem();
 
-    const jobs = [];
+    const batchSize = campaign.batch_size || 0;
+    const pauseMinutes = campaign.pause_between_batches || 0;
+    let currentBatchDelayMs = 0;
+    let jobsAddedCount = 0;
+
+    const jobsToAdd = [];
     for (const recipient of campaign.recipients) {
       if (recipient.status !== 'pending') continue;
+
+      jobsAddedCount++;
+      if (batchSize > 0 && pauseMinutes > 0) {
+        if (jobsAddedCount > 1 && (jobsAddedCount - 1) % batchSize === 0) {
+          currentBatchDelayMs += pauseMinutes * 60 * 1000;
+        }
+      }
 
       const contactKey = recipient.contact_id?.toString?.();
       let variables = {};
@@ -141,42 +186,42 @@ export const processCampaignInBackground = async (campaignOrId) => {
         variables
       };
 
-      const job = await campaignQueue.add('send_campaign_message', {
-        campaignId: campaign._id.toString(),
-        recipient: {
-          contact_id: recipient.contact_id,
-          phone_number: recipient.phone_number
-        },
-        userId: campaign.user_id,
-        templateData: recipientTemplateData,
-        wabaId: campaign.waba_id
-      }, {
+      const jobOpts = {
         attempts: 1,
         backoff: {
           type: 'fixed',
           delay: 1000
         },
         timeout: 30000,
-        jobId: `${campaign._id}-${recipient.contact_id}`
-      });
+        jobId: `${campaign._id}-${recipient.contact_id || recipient.phone_number}`
+      };
 
-      jobs.push(job);
+      if (currentBatchDelayMs > 0) {
+        jobOpts.delay = currentBatchDelayMs;
+      }
+
+      jobsToAdd.push({
+        name: 'send_campaign_message',
+        data: {
+          campaignId: campaign._id.toString(),
+          recipient: {
+            contact_id: recipient.contact_id,
+            phone_number: recipient.phone_number
+          },
+          userId: campaign.user_id,
+          templateData: recipientTemplateData,
+          wabaId: campaign.waba_id
+        },
+        opts: jobOpts
+      });
     }
 
-    console.log(`Added ${jobs.length} jobs to campaign queue for campaign ${campaign._id}`);
+    if (jobsToAdd.length > 0) {
+      await campaignQueue.addBulk(jobsToAdd);
+      console.log(`Added ${jobsToAdd.length} jobs in bulk to campaign queue for campaign ${campaign._id}`);
+    }
 
-    campaign.stats.total_recipients = campaign.recipients.length;
-    campaign.stats.pending_count = campaign.recipients.length;
-    campaign.stats.sent_count = 0;
-    campaign.stats.failed_count = 0;
-    await Campaign.findByIdAndUpdate(campaign._id, {
-      $set: {
-        'stats.total_recipients': campaign.recipients.length,
-        'stats.pending_count': campaign.recipients.length,
-        'stats.sent_count': 0,
-        'stats.failed_count': 0
-      }
-    });
+    // Stats have already been initialized/calculated before the jobs were added to the queue to prevent race conditions.
 
     console.log(`Campaign ${campaign._id} queued for sending. Total recipients: ${campaign.recipients.length}`);
 

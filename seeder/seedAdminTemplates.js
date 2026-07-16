@@ -541,7 +541,7 @@ async function seedAdminTemplates() {
     for (const templateData of templates) {
       await Template.findOneAndUpdate(
         { template_name: templateData.template_name, language: 'en_US' },
-        templateData,
+        { $setOnInsert: templateData },
         { upsert: true, returnDocument: 'after' }
       );
     }

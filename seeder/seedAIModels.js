@@ -56,7 +56,7 @@ async function seedAIModels() {
     for (const modelData of aiModels) {
       await AIModel.findOneAndUpdate(
         { name: modelData.name },
-        modelData,
+        { $setOnInsert: modelData },
         { upsert: true, returnDocument: 'after' }
       );
     }

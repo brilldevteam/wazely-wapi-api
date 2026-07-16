@@ -354,7 +354,7 @@ export const getContacts = async (req, res) => {
   try {
     const {
       page = 1,
-      limit = 10,
+      limit,
       search = '',
       status,
       assigned_to,
@@ -363,10 +363,17 @@ export const getContacts = async (req, res) => {
       source,
       sort_by = 'created_at',
       sort_order = 'desc',
-      platform
+      platform,
+      active_24h
     } = req.query;
 
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+    let parsedLimit = (limit === 'all' || limit === undefined) ? 0 : parseInt(limit);
+    if (isNaN(parsedLimit)) parsedLimit = 10;
+
+    let parsedPage = parseInt(page);
+    if (isNaN(parsedPage) || parsedPage < 1) parsedPage = 1;
+
+    const skip = parsedLimit === 0 ? 0 : (parsedPage - 1) * parsedLimit;
     const sortOrder = sort_order === 'asc' ? 1 : -1;
 
     const isSuperAdmin = req.user.role === 'super_admin';
@@ -480,6 +487,10 @@ export const getContacts = async (req, res) => {
       }
     }
 
+    if (active_24h === 'true') {
+      query.last_incoming_message_at = { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) };
+    }
+
     console.log("query", query);
     const contacts = await Contact.find(query)
       .populate('assigned_to', 'name email')
@@ -493,7 +504,7 @@ export const getContacts = async (req, res) => {
       })
       .sort({ [sort_by]: sortOrder })
       .skip(skip)
-      .limit(parseInt(limit))
+      .limit(parsedLimit)
       .lean();
 
     const total = await Contact.countDocuments(query);
@@ -505,10 +516,10 @@ export const getContacts = async (req, res) => {
       data: {
         contacts,
         pagination: {
-          currentPage: parseInt(page),
-          totalPages: Math.ceil(total / parseInt(limit)),
+          currentPage: parsedPage,
+          totalPages: parsedLimit === 0 ? 1 : Math.ceil(total / parsedLimit),
           totalItems: total,
-          itemsPerPage: parseInt(limit)
+          itemsPerPage: parsedLimit === 0 ? total : parsedLimit
         }
       }
     });
@@ -727,10 +738,7 @@ export const deleteContact = async (req, res) => {
       });
     }
 
-    if (!contact.user_id) {
-      contact.user_id = req.user.owner_id;
-    }
-    await contact.softDelete();
+    await Contact.deleteOne({ _id: id });
 
     await segmentService.removeContactFromAllSegments(id, req.user.owner_id);
 
@@ -807,9 +815,8 @@ export const bulkDeleteContacts = async (req, res) => {
       id => !foundIds.includes(id.toString())
     );
 
-    const result = await Contact.updateMany(
-      { _id: { $in: foundIds } },
-      { $set: { deleted_at: new Date() } }
+    const result = await Contact.deleteMany(
+      { _id: { $in: foundIds } }
     );
 
     await segmentService.removeContactFromAllSegments(foundIds, req.user.owner_id);
@@ -817,9 +824,9 @@ export const bulkDeleteContacts = async (req, res) => {
     const response = {
 
       success: true,
-      message: `${result.modifiedCount} contact(s) deleted successfully`,
+      message: `${result.deletedCount} contact(s) deleted successfully`,
       data: {
-        deletedCount: result.modifiedCount,
+        deletedCount: result.deletedCount,
         deletedIds: foundIds
       }
     };

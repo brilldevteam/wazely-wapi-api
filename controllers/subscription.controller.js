@@ -571,7 +571,7 @@ const PLAN_SENSITIVE_FIELDS = '-stripe_price_id -stripe_product_id -stripe_payme
 const fetchDynamicUsage = async (userId) => {
     const [tagsCount, contactsCount, templatesCount, campaignsCount, customFieldsCount, staffCount, botFlowsCount, aiPromptCount, messagesCount, teamsCount, formsCount, whatsapp_callingCount, messageBotsCount, appointmentBookingsCount, userResult, kanbanFunnelCount, facebookAdCampaignCount, segmentCount, workspaceCount, facebookLeadCount, googleAccountCount, quickReplyCount, fileSizes] = await Promise.all([
         Tag.countDocuments({ created_by: userId, deleted_at: null }),
-        Contact.countDocuments({ created_by: userId, deleted_at: null }),
+        Contact.countDocuments({ user_id: userId, deleted_at: null }),
         Template.countDocuments({ user_id: userId }),
         Campaign.countDocuments({ user_id: userId, deleted_at: null }),
         CustomField.countDocuments({ created_by: userId, deleted_at: null }),
@@ -1752,7 +1752,7 @@ export const getSubscriptionUsage = async (req, res) => {
 
         const [tagsCount, contactsCount, templatesCount, campaignsCount] = await Promise.all([
             Tag.countDocuments({ created_by: userId, deleted_at: null }),
-            Contact.countDocuments({ created_by: userId, deleted_at: null }),
+            Contact.countDocuments({ user_id: userId, deleted_at: null }),
             Template.countDocuments({ user_id: userId }),
             Campaign.countDocuments({ user_id: userId, deleted_at: null })
         ]);

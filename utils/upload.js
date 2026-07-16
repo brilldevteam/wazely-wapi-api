@@ -155,6 +155,8 @@ const fileFilter = (req, file, cb) => {
 };
 
 const checkUserStorageLimit = async (req, files) => {
+  if (!files || files.length === 0) return;
+
   const userId = req.user?.owner_id || req.user?.id;
   if (!userId) return;
 
@@ -228,7 +230,7 @@ const checkUserStorageLimit = async (req, files) => {
         const currentTypeUsageBytes = usageMap[type] || 0;
         const newTypeUsageBytes = newSizesByType[type] || 0;
 
-        if ((currentTypeUsageBytes + newTypeUsageBytes) > limitBytes) {
+        if (newTypeUsageBytes > 0 && (currentTypeUsageBytes + newTypeUsageBytes) > limitBytes) {
           for (const file of files) {
             if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
           }

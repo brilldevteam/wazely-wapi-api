@@ -165,7 +165,7 @@ const processMediaUpload = async (params, userId = null) => {
     throw new Error("Could not retrieve file buffer for WhatsApp upload.");
   }
 
-  const storedUrl = await saveBufferLocally(buffer, file.mimetype, messageType, userId);
+  const storedUrl = await saveBufferLocally(buffer, file.mimetype, messageType, userId, file.originalname);
 
   const mediaId = await uploadMediaToWhatsApp({
     phone_number_id: phoneNumberId,

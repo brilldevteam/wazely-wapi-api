@@ -64,6 +64,35 @@ const chatbotSchema = new mongoose.Schema(
             enum: ['text', 'q&a', 'website_url', 'document'],
             default: 'text'
         },
+        tone: {
+            type: String,
+            enum: ['professional', 'casual', 'friendly', 'humorous', 'empathetic', 'direct'],
+            default: 'professional'
+        },
+        enable_human_handoff: {
+            type: Boolean,
+            default: false
+        },
+        message_limit: {
+            type: Number,
+            default: 0 
+        },
+        handoff_keywords: {
+            type: [String],
+            default: []
+        },
+        handoff_message: {
+            type: String,
+            default: "I'm connecting you with a human agent now. Someone will be with you shortly."
+        },
+        enable_google_meet: {
+            type: Boolean,
+            default: false
+        },
+        voice_settings: {
+            type: mongoose.Schema.Types.Mixed,
+            default: {}
+        },
         deleted_at: {
             type: Date,
             default: null

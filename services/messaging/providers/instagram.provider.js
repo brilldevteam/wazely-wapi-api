@@ -6,7 +6,7 @@ class InstagramProvider {
 
     async sendTextMessage(pageAccessToken, recipientId, text, options = {}) {
         try {
-            const baseUrl = pageAccessToken.startsWith('IGAA') ? 'https://graph.instagram.com' : 'https://graph.facebook.com';
+            const baseUrl = pageAccessToken.startsWith('IGA') ? 'https://graph.instagram.com' : 'https://graph.facebook.com';
             const url = `${baseUrl}/${FB_API_VERSION}/me/messages?access_token=${pageAccessToken}`;
 
             const recipientObj = options.reply_to_comment_id
@@ -35,7 +35,7 @@ class InstagramProvider {
             if (messageType === 'video') igMediaType = 'video';
             if (messageType === 'audio') igMediaType = 'audio';
 
-            const url = `${pageAccessToken.startsWith('IGAA') ? 'https://graph.instagram.com' : 'https://graph.facebook.com'}/${FB_API_VERSION}/me/messages?access_token=${pageAccessToken}`;
+            const url = `${pageAccessToken.startsWith('IGA') ? 'https://graph.instagram.com' : 'https://graph.facebook.com'}/${FB_API_VERSION}/me/messages?access_token=${pageAccessToken}`;
 
             const recipientObj = options.reply_to_comment_id
                 ? { comment_id: options.reply_to_comment_id }
@@ -66,14 +66,23 @@ class InstagramProvider {
 
     async sendInteractiveMessage(pageAccessToken, recipientId, text, buttons = [], imageUrl = null, options = {}) {
         try {
-            const baseUrl = pageAccessToken.startsWith('IGAA') ? 'https://graph.instagram.com' : 'https://graph.facebook.com';
+            const baseUrl = pageAccessToken.startsWith('IGA') ? 'https://graph.instagram.com' : 'https://graph.facebook.com';
             const url = `${baseUrl}/${FB_API_VERSION}/me/messages?access_token=${pageAccessToken}`;
 
-            const templateButtons = (buttons || []).slice(0, 3).map(btn => ({
-                type: "postback",
-                title: (btn.text || btn.title).substring(0, 20),
-                payload: btn.id || btn.payload || btn.text || btn.title
-            }));
+            const templateButtons = (buttons || []).slice(0, 3).map(btn => {
+                if (btn.type === 'url' || btn.url || btn.type === 'web_url') {
+                    return {
+                        type: "web_url",
+                        url: btn.url,
+                        title: (btn.text || btn.title).substring(0, 20)
+                    };
+                }
+                return {
+                    type: "postback",
+                    title: (btn.text || btn.title).substring(0, 20),
+                    payload: btn.id || btn.payload || btn.text || btn.title
+                };
+            });
 
             const normalized = (text || "Message").replace(/\r\n/g, '\n').trim();
             let title = normalized;
@@ -138,7 +147,7 @@ class InstagramProvider {
 
     async sendCarouselMessage(pageAccessToken, recipientId, elements, options = {}) {
         try {
-            const url = `${pageAccessToken.startsWith('IGAA') ? 'https://graph.instagram.com' : 'https://graph.facebook.com'}/${FB_API_VERSION}/me/messages?access_token=${pageAccessToken}`;
+            const url = `${pageAccessToken.startsWith('IGA') ? 'https://graph.instagram.com' : 'https://graph.facebook.com'}/${FB_API_VERSION}/me/messages?access_token=${pageAccessToken}`;
 
             const recipientObj = options.reply_to_comment_id
                 ? { comment_id: options.reply_to_comment_id }
@@ -169,7 +178,7 @@ class InstagramProvider {
 
     async sendReaction(pageAccessToken, recipientId, messageId, emoji) {
         try {
-            const baseUrl = pageAccessToken.startsWith('IGAA') ? 'https://graph.instagram.com' : 'https://graph.facebook.com';
+            const baseUrl = pageAccessToken.startsWith('IGA') ? 'https://graph.instagram.com' : 'https://graph.facebook.com';
             const url = `${baseUrl}/${FB_API_VERSION}/me/messages?access_token=${pageAccessToken}`;
             const payload = {
                 recipient: { id: recipientId },
@@ -192,12 +201,12 @@ class InstagramProvider {
 
     async subscribePageToWebhook(pageId, pageAccessToken) {
         try {
-            const baseUrl = pageAccessToken.startsWith('IGAA') ? 'https://graph.instagram.com' : 'https://graph.facebook.com';
+            const baseUrl = pageAccessToken.startsWith('IGA') ? 'https://graph.instagram.com' : 'https://graph.facebook.com';
             const url = `${baseUrl}/${FB_API_VERSION}/${pageId}/subscribed_apps`;
 
             const response = await axios.post(url, null, {
                 params: {
-                    subscribed_fields: 'leadgen,messages,messaging_postbacks,message_reactions,feed',
+                    subscribed_fields: 'messages,messaging_postbacks,message_reactions,message_reads,comments',
                     access_token: pageAccessToken
                 }
             });

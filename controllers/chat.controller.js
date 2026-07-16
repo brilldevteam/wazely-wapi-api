@@ -743,9 +743,16 @@ export const assignChatToAgent = async (req, res) => {
       businessPhoneNumber = phoneNumber.display_phone_number;
     }
 
-    const contactPhoneNumber = contact.phone_number;
+    const contactPhoneNumber = contact.phone_number || contact.facebook_page_scoped_id || contact.instagram_scoped_id || contact.telegram_chat_id || contact.twitter_user_id;
     const sender_number = contactPhoneNumber;
     const receiver_number = businessPhoneNumber;
+
+    if (!sender_number) {
+      return res.status(400).json({
+        success: false,
+        message: 'Could not resolve contact identifier (phone_number or platform scoped id)'
+      });
+    }
 
     const chatMatch = {
       $or: [
@@ -840,7 +847,14 @@ export const unassignChatFromAgent = async (req, res) => {
       businessPhoneNumber = phoneNumber.display_phone_number;
     }
 
-    const contactPhoneNumber = contact.phone_number;
+    const contactPhoneNumber = contact.phone_number || contact.facebook_page_scoped_id || contact.instagram_scoped_id || contact.telegram_chat_id || contact.twitter_user_id;
+    
+    if (!contactPhoneNumber) {
+      return res.status(400).json({
+        success: false,
+        message: 'Could not resolve contact identifier (phone_number or platform scoped id)'
+      });
+    }
 
     const chatMatch = {
       $or: [
@@ -906,8 +920,9 @@ export const updateChatStatus = async (req, res) => {
       });
     }
 
+    let phoneNumber = null;
     if (mongoose.Types.ObjectId.isValid(whatsapp_phone_number_id)) {
-      const phoneNumber = await WhatsappPhoneNumber.findOne({
+      phoneNumber = await WhatsappPhoneNumber.findOne({
         _id: whatsapp_phone_number_id,
         user_id: userId,
         deleted_at: null
@@ -948,7 +963,7 @@ export const updateChatStatus = async (req, res) => {
       );
     }
 
-    const myPhoneNumber = phoneNumber.display_phone_number;
+    const myPhoneNumber = phoneNumber ? phoneNumber.display_phone_number : whatsapp_phone_number_id;
 
     const agentName = req.user.name || 'Admin';
 

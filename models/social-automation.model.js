@@ -98,18 +98,13 @@ const socialAutomationSchema = new mongoose.Schema({
     },
     hide_condition_type: {
         type: String,
-        enum: ['keywords', 'chatbot'],
+        enum: ['keywords', 'aimodel'],
         default: 'keywords'
     },
     hide_keywords: [{
         type: String,
         trim: true
     }],
-    hide_chatbot_id: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'Chatbot',
-        default: null
-    },
     requires_following: {
         type: Boolean,
         default: false 

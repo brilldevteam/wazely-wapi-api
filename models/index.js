@@ -46,6 +46,7 @@ import TelegramConnection from './telegram-connection.model.js';
 import FacebookConnection from './facebook-connection.model.js';
 import InstagramConnection from './instagram-connection.model.js';
 import TwitterConnection from './twitter-connection.model.js'; // DISABLED: Twitter not working (kept as stub)
+
 import ChatAssignment from './chat-assignment.model.js';
 import Template from './template.model.js';
 import Webhook from './webhook.model.js';
@@ -81,6 +82,7 @@ import Tax from './tax.model.js';
 import GoogleAccount from './google-account.model.js';
 import GoogleCalendar from './google-calendar.model.js';
 import GoogleSheet from './google-sheet.model.js';
+import GoogleForm from './google-form.model.js';
 import QuickReply from './quick-reply.model.js';
 import QuickReplyFavorite from './quick-reply-favorite.model.js';
 import KanbanFunnel from './kanban-funnel.model.js';
@@ -144,6 +146,7 @@ const db = {
   FacebookConnection,
   InstagramConnection,
   TwitterConnection,
+
   ChatAssignment,
   Template,
   Webhook,
@@ -185,6 +188,7 @@ const db = {
   GoogleAccount,
   GoogleCalendar,
   GoogleSheet,
+  GoogleForm,
   Form,
   AppointmentConfig,
   AppointmentBooking,
@@ -248,5 +252,5 @@ export {
   FacebookLeadForm,
   FacebookLead,
   Segment,
-  Plan, Template, Webhook, Subscription, PaymentHistory, AIModel, AgentTask, AutomationFlow, AutomationExecution, TelegramConnection, FacebookConnection, InstagramConnection, TwitterConnection, ChatAssignment, Contact, CustomField, Tag, Attachment, Campaign, UserSetting, EcommerceCatalog, EcommerceProduct, EcommerceOrder, EcommerceOrderStatusTemplate, LandingPage, AuthPageSetup, ApiKey, Widget, ShortLink, ImportJob, ReplyMaterial, WorkingHours, Workspace, Sequence, SequenceStep, WabaConfiguration, Tax, GoogleAccount, GoogleCalendar, GoogleSheet, QuickReply, QuickReplyFavorite, KanbanFunnel, KanbanItem, Guide, SocialAutomation, SocialMediaPost, ProcessedSocialComment, CookieConsentLog, ShopifyConfiguration, PlanSnippet, connectDB
+  Plan, Template, Webhook, Subscription, PaymentHistory, AIModel, AgentTask, AutomationFlow, AutomationExecution, TelegramConnection, FacebookConnection, InstagramConnection, TwitterConnection, ChatAssignment, Contact, CustomField, Tag, Attachment, Campaign, UserSetting, EcommerceCatalog, EcommerceProduct, EcommerceOrder, EcommerceOrderStatusTemplate, LandingPage, AuthPageSetup, ApiKey, Widget, ShortLink, ImportJob, ReplyMaterial, WorkingHours, Workspace, Sequence, SequenceStep, WabaConfiguration, Tax, GoogleAccount, GoogleCalendar, GoogleSheet, GoogleForm, QuickReply, QuickReplyFavorite, KanbanFunnel, KanbanItem, Guide, SocialAutomation, SocialMediaPost, ProcessedSocialComment, CookieConsentLog, ShopifyConfiguration, PlanSnippet, connectDB
 };

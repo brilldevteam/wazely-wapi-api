@@ -111,7 +111,7 @@ const seedGuide = async () => {
                     {
                         title: 'Connection Methods',
                         content: `
-                            <p>To use WhatsDesk  effectively, you must connect your WhatsApp Business Account (WABA). Choose the method that best suits your technical preference:</p>
+                            <p>To use Wapi  effectively, you must connect your WhatsApp Business Account (WABA). Choose the method that best suits your technical preference:</p>
                             <ul>
                                 <li><strong>Method A: Embedded Signup (Recommended)</strong> - The fastest way to connect. Authenticate directly via Meta.</li>
                                 <li><strong>Method B: QR Code Connection</strong> - Quickly link your device by scanning a code.</li>
@@ -3845,7 +3845,7 @@ Click on "Verify and Save" to complete the webhook setup and start receiving rea
             guideData.position = categoryPositions[guideData.category] || 999;
             await Guide.findOneAndUpdate(
                 { title: guideData.title, category: guideData.category },
-                guideData,
+                { $setOnInsert: guideData },
                 { upsert: true, returnDocument: 'after' }
             );
         }

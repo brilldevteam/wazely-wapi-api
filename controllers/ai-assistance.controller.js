@@ -168,9 +168,25 @@ export const transformMessage = async (req, res) => {
     });
   } catch (error) {
     console.error('Transform message error:', error);
+    
+    let errorMessage = 'Failed to transform message.';
+    if (error.response?.data?.error?.message) {
+      errorMessage = `AI Error: ${error.response.data.error.message}`;
+    } else if (error.response?.data?.message) {
+      errorMessage = `AI Error: ${error.response.data.message}`;
+    } else if (error.message) {
+      if (error.message.includes('429')) errorMessage = 'AI Rate limit exceeded. Please try again later.';
+      else if (error.message.includes('timeout')) errorMessage = 'AI request timed out.';
+      else errorMessage = `AI Error: ${error.message}`;
+    }
+
+    if (errorMessage.length > 120) {
+      errorMessage = errorMessage.substring(0, 117) + '...';
+    }
+
     return res.status(500).json({
       success: false,
-      message: 'Failed to transform message',
+      message: errorMessage,
       error: error.message
     });
   }
@@ -310,9 +326,25 @@ Rules:
     });
   } catch (error) {
     console.error('Suggest reply error:', error);
+    
+    let errorMessage = 'Failed to suggest reply.';
+    if (error.response?.data?.error?.message) {
+      errorMessage = `AI Error: ${error.response.data.error.message}`;
+    } else if (error.response?.data?.message) {
+      errorMessage = `AI Error: ${error.response.data.message}`;
+    } else if (error.message) {
+      if (error.message.includes('429')) errorMessage = 'AI Rate limit exceeded. Please try again later.';
+      else if (error.message.includes('timeout')) errorMessage = 'AI request timed out.';
+      else errorMessage = `AI Error: ${error.message}`;
+    }
+
+    if (errorMessage.length > 120) {
+      errorMessage = errorMessage.substring(0, 117) + '...';
+    }
+
     return res.status(500).json({
       success: false,
-      message: 'Failed to suggest reply',
+      message: errorMessage,
       error: error.message
     });
   }

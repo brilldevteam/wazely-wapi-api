@@ -82,7 +82,7 @@ export const updateReadStatus = async (messageId, status, timestamp = null) => {
 };
 
 
-export const updateWhatsAppStatus = async (waMessageId, status, timestamp = null) => {
+export const updateWhatsAppStatus = async (waMessageId, status, timestamp = null, failureReason = null) => {
   try {
     if (!waMessageId) {
       throw new Error('WhatsApp message ID is required');
@@ -92,6 +92,11 @@ export const updateWhatsAppStatus = async (waMessageId, status, timestamp = null
       wa_status: status,
       wa_status_timestamp: timestamp || new Date()
     };
+
+    const existingMessage = await Message.findOne({ wa_message_id: waMessageId }).select('delivered_at').lean();
+    if (status === 'read' && existingMessage && !existingMessage.delivered_at) {
+      updateData.delivered_at = timestamp || new Date();
+    }
 
     switch (status) {
       case 'sent':
@@ -106,6 +111,8 @@ export const updateWhatsAppStatus = async (waMessageId, status, timestamp = null
         updateData.read_status = 'read';
         updateData.is_seen = true;
         updateData.seen_at = timestamp || new Date();
+        updateData.delivery_status = 'delivered';
+        updateData.is_delivered = true;
         break;
       case 'failed':
         updateData.delivery_status = 'failed';
@@ -150,7 +157,7 @@ export const updateWhatsAppStatus = async (waMessageId, status, timestamp = null
 
     try {
       const { updateCampaignStatsFromMessage } = await import('./campaign-stats.service.js');
-      await updateCampaignStatsFromMessage(updatedMessage._id.toString(), status, timestamp);
+      await updateCampaignStatsFromMessage(updatedMessage._id.toString(), status, timestamp, failureReason);
     } catch (campaignError) {
       console.error('Error updating campaign stats:', campaignError);
     }

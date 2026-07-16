@@ -1,5 +1,6 @@
 import BusinessAPIProvider from './providers/business-api.provider.js';
 import BaileysProvider from './providers/baileys.provider.js';
+
 import db from '../../models/index.js';
 const {
   WhatsappConnection,
@@ -42,7 +43,7 @@ class UnifiedWhatsAppService {
           }
           const contact = await Contact.findById(contact_id);
           if (contact && ['telegram', 'facebook', 'instagram'].includes(contact.source)) {
-             return;
+            return;
           }
 
           const lastMessage = await Message.findOne({
@@ -192,17 +193,13 @@ class UnifiedWhatsAppService {
       templateId
     } = messageParams;
 
-    if (contactId && !messageParams.ignoreUnsubscribe) {
-      const contact = await Contact.findById(contactId);
-      if (contact?.is_unsubscribed) {
-        throw new Error('Contact has unsubscribed and cannot receive messages.');
-      }
-    }
-
-    if (contactId && !recipientNumber) {
+    if (contactId) {
       const contact = await Contact.findById(contactId);
       if (contact) {
-        recipientNumber = contact.phone_number;
+        if (contact.is_unsubscribed && !messageParams.ignoreUnsubscribe) {
+          throw new Error('Contact has unsubscribed and cannot receive messages.');
+        }
+        recipientNumber = contact.whatsapp_bsuid || contact.whatsapp_username || recipientNumber || contact.phone_number;
       }
     }
 
@@ -233,7 +230,7 @@ class UnifiedWhatsAppService {
           console.error(`[UnifiedService] ReplyMaterial not found for ID: ${replyId}`);
         }
       } else if (replyType === 'Template' || replyType === 'template') {
-        const template = await Template.findById(replyId);
+        const template = await Template.findById(replyId).lean();
         if (template) {
           messageType = 'template';
           templateName = template.template_name;
@@ -260,6 +257,10 @@ class UnifiedWhatsAppService {
         || await Template.findOne({ template_name: templateName, user_id: userId, deleted_at: null }).lean()
         || await Template.findOne({ template_name: templateName, deleted_at: null }).lean();
 
+      if (template && !messageText) {
+        messageText = template.message_body || `Template: ${template.template_name}`;
+      }
+
       if (templateComponents.length === 0) {
         let finalHeaderUrl = mediaUrl;
         let headerType = null;
@@ -267,7 +268,7 @@ class UnifiedWhatsAppService {
         if (!finalHeaderUrl && template?.header && ['IMAGE', 'VIDEO', 'DOCUMENT', 'MEDIA'].includes((template.header.format || '').toUpperCase())) {
           finalHeaderUrl = template.header.media_url;
           headerType = (template.header.media_type || template.header.format || 'image').toLowerCase();
-          if (headerType === 'media') headerType = 'image'; 
+          if (headerType === 'media') headerType = 'image';
           console.log(`[UnifiedService] Auto-injecting template header from DB: ${headerType} -> ${finalHeaderUrl}`);
         }
 
@@ -279,12 +280,37 @@ class UnifiedWhatsAppService {
             else if (finalHeaderUrl.endsWith('.pdf') || finalHeaderUrl.includes('document')) mediaType = 'document';
           }
 
+          const headerParam = {
+            type: mediaType,
+            [mediaType]: { link: finalHeaderUrl }
+          };
+
+          if (mediaType === 'document') {
+            let filename = 'document.pdf';
+            if (messageParams.campaignOriginalFilename) {
+              filename = messageParams.campaignOriginalFilename;
+            } else if (messageParams.file && messageParams.file.originalname) {
+              filename = messageParams.file.originalname;
+            } else if (template?.header?.original_filename) {
+              filename = template.header.original_filename;
+            } else {
+              try {
+                const decodedPath = decodeURIComponent(finalHeaderUrl);
+                const urlWithoutQuery = decodedPath.split('?')[0];
+                const extractedFilename = path.basename(urlWithoutQuery);
+                if (extractedFilename && extractedFilename.includes('.')) {
+                  filename = extractedFilename.replace(/-\d{10,13}(?=\.\w+$)/, '');
+                }
+              } catch (err) {
+                filename = 'document.pdf';
+              }
+            }
+            headerParam.document.filename = filename;
+          }
+
           templateComponents.push({
             type: 'header',
-            parameters: [{
-              type: mediaType,
-              [mediaType]: { link: finalHeaderUrl }
-            }]
+            parameters: [headerParam]
           });
         }
 
@@ -375,8 +401,40 @@ class UnifiedWhatsAppService {
         const templateType = template ? (template.template_type || '').toLowerCase() : '';
         const isCarouselTemplate = template && ['carousel_product', 'carousel_media'].includes(templateType);
         const carouselProducts = messageParams.carouselProducts && Array.isArray(messageParams.carouselProducts) ? messageParams.carouselProducts : [];
-        const carouselCardsData = messageParams.carouselCardsData && Array.isArray(messageParams.carouselCardsData) ? messageParams.carouselCardsData : [];
+        let carouselCardsData = messageParams.carouselCardsData && Array.isArray(messageParams.carouselCardsData) ? messageParams.carouselCardsData : [];
         if (isCarouselTemplate) {
+          if (carouselProducts.length === 0 && carouselCardsData.length === 0) {
+            if (template && Array.isArray(template.carousel_cards)) {
+              carouselCardsData = template.carousel_cards.map(card => {
+                const headerComp = card.components?.find(c => c.type === 'header');
+                const buttonsComp = card.components?.find(c => c.type === 'buttons');
+
+                let cardHeader = null;
+                if (headerComp) {
+                  cardHeader = {
+                    type: headerComp.format || 'image',
+                    link: headerComp.example?.header_handle?.[0] || headerComp.media_url || headerComp.media_handle || null,
+                    id: headerComp.media_id || null
+                  };
+                }
+
+                let cardButtons = [];
+                if (buttonsComp && Array.isArray(buttonsComp.buttons)) {
+                  cardButtons = buttonsComp.buttons.map(btn => ({
+                    type: btn.type,
+                    url_value: btn.url_value || btn.url,
+                    payload: btn.payload
+                  }));
+                }
+
+                return {
+                  header: cardHeader,
+                  buttons: cardButtons
+                };
+              });
+            }
+          }
+
           if (carouselProducts.length > 0) {
             templateComponents.push({
               type: 'carousel',
@@ -491,7 +549,7 @@ class UnifiedWhatsAppService {
     if (recipientNumber) {
       await Contact.updateOne(
         { phone_number: recipientNumber, created_by: userId },
-        { last_outgoing_message_at: new Date() }
+        { last_outgoing_message_at: new Date(), snooze_count: 0, is_snoozed: false }
       );
     }
 
@@ -535,12 +593,16 @@ class UnifiedWhatsAppService {
           : await Message.findOne({ wa_message_id: result.messageId }).lean();
         if (savedMessage) {
           const contact = await Contact.findById(savedMessage.contact_id).lean();
+          const templateObj = savedMessage.template_id
+            ? await Template.findById(savedMessage.template_id).lean()
+            : null;
           this.io.emit('whatsapp:message', {
             id: savedMessage._id.toString(),
             messageId: savedMessage._id.toString(),
             senderNumber: savedMessage.sender_number,
             recipientNumber: savedMessage.recipient_number,
             content: savedMessage.content,
+            interactiveData: savedMessage.interactive_data,
             messageType: savedMessage.message_type,
             fileUrl: savedMessage.file_url,
             fromMe: savedMessage.from_me,
@@ -554,7 +616,9 @@ class UnifiedWhatsAppService {
             wa_message_id: savedMessage.wa_message_id,
             user_id: savedMessage.user_id?.toString(),
             whatsapp_phone_number_id: whatsappPhoneNumber ? whatsappPhoneNumber._id?.toString() : (messageParams.whatsappPhoneNumberId?.toString() || null),
-            platform: savedMessage.platform || 'whatsapp'
+            platform: savedMessage.platform || 'whatsapp',
+            template: templateObj,
+            metadata: savedMessage.metadata || null
           });
         }
       } catch (err) {
