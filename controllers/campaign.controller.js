@@ -746,7 +746,7 @@ export const getAllCampaigns = async (req, res) => {
       Campaign.countDocuments(matchFilter),
       Campaign.find(matchFilter)
         .select(
-          'name description recipient_type is_published is_scheduled is_recurring scheduled_at sent_at stats status completion_duration_seconds template_id created_at platform'
+          'name description recipient_type is_published is_scheduled is_recurring is_paused scheduled_at sent_at completed_at stats status completion_duration_seconds template_id created_at platform'
         )
         .populate({
           path: 'template_id',
@@ -798,6 +798,7 @@ export const getAllCampaigns = async (req, res) => {
       total_read: 0
     };
 
+    const terminalStatusUpdates = [];
     const formattedCampaigns = campaigns.map(c => {
       let stats = c.stats;
       if (c.is_recurring && childStatsMap[c._id.toString()]) {
@@ -812,6 +813,41 @@ export const getAllCampaigns = async (req, res) => {
           pending_count: Math.max(0, (cs.total_recipients || c.stats?.total_recipients || 0) - cs.sent_count - cs.failed_count)
         };
       }
+
+      const totalRecipients = Number(stats?.total_recipients || 0);
+      const pendingCount = Math.max(0, Number(stats?.pending_count || 0));
+      const failedCount = Number(stats?.failed_count || 0);
+      const isFinishedOneTimeCampaign =
+        !c.is_recurring &&
+        totalRecipients > 0 &&
+        pendingCount === 0 &&
+        ['draft', 'sending'].includes(c.status);
+
+      if (isFinishedOneTimeCampaign) {
+        c.status =
+          failedCount >= totalRecipients
+            ? 'failed'
+            : failedCount > 0
+              ? 'completed_with_errors'
+              : 'completed';
+        c.is_paused = false;
+        c.completed_at = c.completed_at || new Date();
+        terminalStatusUpdates.push({
+          updateOne: {
+            filter: { _id: c._id, status: { $in: ['draft', 'sending'] } },
+            update: {
+              $set: {
+                status: c.status,
+                is_paused: false,
+                completed_at: c.completed_at,
+                'stats.pending_count': 0,
+                updated_at: new Date()
+              }
+            }
+          }
+        });
+      }
+
       return {
         id: c._id,
         name: c.name,
@@ -821,14 +857,20 @@ export const getAllCampaigns = async (req, res) => {
         is_published: c.is_published,
         is_scheduled: c.is_scheduled,
         is_recurring: c.is_recurring,
+        is_paused: c.is_paused,
         scheduled_at: c.scheduled_at,
         sent_at: c.sent_at,
+        completed_at: c.completed_at,
         stats,
         status: c.status,
         completion_duration_seconds: c.completion_duration_seconds,
         platform: c.platform
       };
     });
+
+    if (terminalStatusUpdates.length > 0) {
+      await Campaign.bulkWrite(terminalStatusUpdates);
+    }
 
     return res.json({
       success: true,
@@ -1697,10 +1739,12 @@ export const togglePauseCampaign = async (req, res) => {
     }
 
     if (campaign.is_paused) {
+      campaign.is_paused = false;
+      await campaign.save();
+
       setImmediate(async () => {
         await processCampaignInBackground(campaign._id);
       });
-      campaign.is_paused = false;
 
       return res.status(200).json({
         success: true,

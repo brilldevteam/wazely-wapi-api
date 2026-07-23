@@ -1478,21 +1478,45 @@ export const processCampaignMessageJob = async (jobData) => {
 
 export const monitorCampaignCompletion = async (campaignId) => {
   try {
-    const campaign = await Campaign.findById(campaignId);
+    const campaign = await Campaign.findById(campaignId)
+      .select('status is_paused is_recurring recipients stats sent_at completed_at');
     if (!campaign) {
       console.error(`Campaign ${campaignId} not found`);
       return;
     }
 
-    const pendingRecipientsMonitor = campaign.recipients.filter(r => r.status === 'pending');
-    if (pendingRecipientsMonitor.length === 0) {
-      const failedCount = campaign.recipients.filter(r => r.status === 'failed').length;
-      campaign.status = failedCount > 0 ? 'completed_with_errors' : 'completed';
-      campaign.completed_at = new Date();
-      await campaign.save();
+    const pendingCount = campaign.recipients.filter((r) => r.status === 'pending').length;
+    const failedCount = campaign.recipients.filter((r) => r.status === 'failed').length;
+    const sentCount = campaign.recipients.filter(
+      (r) => ['sent', 'delivered', 'read'].includes(r.status)
+    ).length;
+
+    campaign.stats.total_recipients = campaign.recipients.length;
+    campaign.stats.pending_count = pendingCount;
+    campaign.stats.failed_count = failedCount;
+    campaign.stats.sent_count = sentCount;
+
+    if (pendingCount === 0 && campaign.recipients.length > 0 && !campaign.is_recurring) {
+      campaign.status =
+        failedCount >= campaign.recipients.length
+          ? 'failed'
+          : failedCount > 0
+            ? 'completed_with_errors'
+            : 'completed';
+      campaign.is_paused = false;
+      campaign.completed_at = campaign.completed_at || new Date();
+
+      if (campaign.sent_at) {
+        campaign.completion_duration_seconds = Math.max(
+          0,
+          Math.round((campaign.completed_at - campaign.sent_at) / 1000)
+        );
+      }
 
       console.log(`Campaign ${campaignId} completed. Status: ${campaign.status}`);
     }
+
+    await campaign.save();
   } catch (error) {
     console.error(`Error monitoring campaign completion ${campaignId}:`, error);
   }

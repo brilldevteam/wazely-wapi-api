@@ -66,17 +66,24 @@ const initializeQueueSystem = () => {
             : recipientData
         };
 
-        const { processCampaignMessageJob } = await import('../utils/campaign-job-processor.js');
+        const {
+          processCampaignMessageJob,
+          monitorCampaignCompletion
+        } = await import('../utils/campaign-job-processor.js');
 
-        const result = await processCampaignMessageJob(normalizedJobData);
+        try {
+          const result = await processCampaignMessageJob(normalizedJobData);
 
-        console.log(`=== COMPLETED JOB ${job.id} ===`, {
-          campaignId: job.data.campaignId,
-          recipient: phoneNumber,
-          jobId: job.id,
-          timestamp: new Date().toISOString()
-        });
-        return result;
+          console.log(`=== COMPLETED JOB ${job.id} ===`, {
+            campaignId: job.data.campaignId,
+            recipient: phoneNumber,
+            jobId: job.id,
+            timestamp: new Date().toISOString()
+          });
+          return result;
+        } finally {
+          await monitorCampaignCompletion(job.data.campaignId);
+        }
       },
       {
         connection: _redisConnection,
