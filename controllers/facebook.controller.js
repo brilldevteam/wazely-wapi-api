@@ -277,6 +277,14 @@ export const handleFacebookCallback = async (req, res) => {
   } catch (error) {
     console.error('Error handling Facebook callback:', error?.response?.data || error);
 
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        error: 'Integration Conflict',
+        details: 'An active Facebook connection already exists for this account. Please disconnect the current integration before setting up a new one.'
+      });
+    }
+
     return res.status(500).json({
       success: false,
       error: 'Failed to complete Facebook setup',

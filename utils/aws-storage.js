@@ -99,7 +99,6 @@ class AWSStorage {
           Key: key,
           Body: body,
           ContentType: file.mimetype || 'application/octet-stream',
-          ACL: 'public-read',
         },
       });
 
@@ -132,7 +131,7 @@ class AWSStorage {
 
           key = keyName;
         } catch (urlErr) {
-        
+
           const urlMatch = fileUrl.match(/amazonaws\.com\/(.+)$/);
           if (urlMatch) {
             key = decodeURIComponent(urlMatch[1].split('?')[0]);

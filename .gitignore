@@ -1,6 +1,7 @@
+package-lock.json
 node_modules/
 .env
 uploads/
-logs/
-.DS_Store
-npm-debug.log*
+auth_info_baileys
+auth
+storage

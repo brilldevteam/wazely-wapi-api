@@ -65,11 +65,20 @@ class FacebookProvider {
         try {
             const url = `https://graph.facebook.com/${FB_API_VERSION}/me/messages?access_token=${pageAccessToken}`;
             
-            const templateButtons = (buttons || []).slice(0, 3).map(btn => ({
-                type: "postback",
-                title: (btn.text || btn.title).substring(0, 20),
-                payload: btn.id || btn.payload || btn.text || btn.title
-            }));
+            const templateButtons = (buttons || []).slice(0, 3).map(btn => {
+                if (btn.type === 'url' || btn.url || btn.type === 'web_url') {
+                    return {
+                        type: "web_url",
+                        url: btn.url,
+                        title: (btn.text || btn.title).substring(0, 20)
+                    };
+                }
+                return {
+                    type: "postback",
+                    title: (btn.text || btn.title).substring(0, 20),
+                    payload: btn.id || btn.payload || btn.text || btn.title
+                };
+            });
 
             const normalized = (text || "Message").replace(/\r\n/g, '\n').trim();
             let title = normalized;

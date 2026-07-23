@@ -114,14 +114,14 @@ const buildApiEndpoint = (model, apiKey) => {
     }
 
     if (url.endsWith('/models') || url.endsWith('/v1') || url.endsWith('/v1beta')) {
-        const baseUrl = url.endsWith('/models') ? url : `${url.replace(/\/$/, '')}/models`;
-        url = `${baseUrl}/${model_id}:generateContent`;
+      const baseUrl = url.endsWith('/models') ? url : `${url.replace(/\/$/, '')}/models`;
+      url = `${baseUrl}/${model_id}:generateContent`;
     } else if (!url.includes(':generateContent')) {
-        if (url.endsWith(model_id)) {
-            url = `${url}:generateContent`;
-        } else if (!url.includes('/models/')) {
-            url = `${url.replace(/\/$/, '')}/models/${model_id}:generateContent`;
-        }
+      if (url.endsWith(model_id)) {
+        url = `${url}:generateContent`;
+      } else if (!url.includes('/models/')) {
+        url = `${url.replace(/\/$/, '')}/models/${model_id}:generateContent`;
+      }
     }
 
     const separator = url.includes('?') ? '&' : '?';
@@ -192,7 +192,7 @@ const testAIModel = async (model, prompt, apiKey) => {
     throw new Error('API key not found in model configuration');
   }
 
-  return await callAIModel(model, apiKey, prompt);
+  return await callAIModel(null, model, apiKey, prompt);
 };
 
 export {

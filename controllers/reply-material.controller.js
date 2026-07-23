@@ -17,8 +17,8 @@ export const createReplyMaterial = async (req, res) => {
         const userId = req.user?.owner_id;
         const { waba_id, type, name, content } = req.body;
 
-        if (!waba_id || !type || !name) {
-            return res.status(400).json({ success: false, message: 'waba_id, type, and name are required' });
+        if (!type || !name) {
+            return res.status(400).json({ success: false, message: 'type and name are required' });
         }
 
         let filePath = null;
@@ -29,9 +29,11 @@ export const createReplyMaterial = async (req, res) => {
             filePath = req.file.path.startsWith('http') ? req.file.path : `/${req.file.destination}/${req.file.filename}`.replace(/\\/g, '/');
         }
 
+        const validWabaId = (waba_id && waba_id !== 'undefined' && waba_id !== 'null') ? waba_id : null;
+
         const replyMaterial = await ReplyMaterial.create({
             user_id: userId,
-            waba_id,
+            waba_id: validWabaId,
             type,
             name,
             content: (type === 'text' || type === 'flow') ? content : null,
@@ -68,9 +70,7 @@ export const getReplyMaterials = async (req, res) => {
         const userId = req.user?.owner_id;
         const { waba_id, page = 1, limit = 10, search = '' } = req.query;
 
-        if (!waba_id) {
-            return res.status(400).json({ success: false, message: 'waba_id is required' });
-        }
+        const wabaFilter = (waba_id && waba_id !== 'undefined' && waba_id !== 'null') ? { waba_id } : {};
 
         const types = ['text', 'audio', 'video', 'document', 'image', 'sticker', 'flow'];
         const result = {};
@@ -78,10 +78,12 @@ export const getReplyMaterials = async (req, res) => {
         for (const type of types) {
             const query = {
                 user_id: userId,
-                waba_id,
                 type,
                 deleted_at: null
             };
+
+            // We do NOT filter standard reply materials by waba_id
+            // so they are globally available across all WABA accounts for this user.
 
             if (search) {
                 query.name = { $regex: search, $options: 'i' };
@@ -115,7 +117,8 @@ export const getReplyMaterials = async (req, res) => {
         }
 
         const templateQuery = {
-            waba_id,
+            user_id: userId,
+            ...wabaFilter,
             status: 'approved'
         };
         if (search) {
@@ -142,7 +145,8 @@ export const getReplyMaterials = async (req, res) => {
         };
 
         const catalogQuery = {
-            waba_id,
+            user_id: userId,
+            ...wabaFilter,
             is_active: true,
             deleted_at: null
         };
@@ -228,7 +232,7 @@ export const getReplyMaterials = async (req, res) => {
             }
         };
 
-        const sequenceQuery = { user_id: userId, waba_id, deleted_at: null };
+        const sequenceQuery = { user_id: userId, ...wabaFilter, deleted_at: null };
         if (search) sequenceQuery.name = { $regex: search, $options: 'i' };
         const sequenceSkip = (parseInt(page) - 1) * parseInt(limit);
         const sequences = await Sequence.find(sequenceQuery)
@@ -280,7 +284,7 @@ export const getReplyMaterials = async (req, res) => {
 
         const appointmentQuery = {
             user_id: userId,
-            waba_id,
+            ...wabaFilter,
             deleted_at: null
         };
         if (search) {

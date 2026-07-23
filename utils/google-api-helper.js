@@ -10,6 +10,8 @@ export const SCOPES = [
   'https://www.googleapis.com/auth/userinfo.email',
   'https://www.googleapis.com/auth/drive.metadata.readonly',
   'https://www.googleapis.com/auth/drive',
+  'https://www.googleapis.com/auth/forms.body',
+  'https://www.googleapis.com/auth/forms.responses.readonly',
   'openid'
 ];
 
@@ -90,11 +92,17 @@ export const getSheetsClient = async (googleAccountId) => {
   return google.sheets({ version: 'v4', auth });
 };
 
+export const getFormsClient = async (googleAccountId) => {
+  const auth = await getAuthenticatedClient(googleAccountId);
+  return google.forms({ version: 'v1', auth });
+};
+
 export default {
   getOAuth2Client,
   getAuthenticatedClient,
   getCalendarClient,
   getSheetsClient,
+  getFormsClient,
   handleGoogleApiError,
   SCOPES
 };

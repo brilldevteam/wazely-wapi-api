@@ -129,6 +129,9 @@ export const getUserSettings = async (req, res) => {
         api_key: userSettings.api_key,
         notification_tone: userSettings.notification_tone || 'default',
         notifications_enabled: userSettings.notifications_enabled ?? true,
+        is_snooze_enabled: userSettings.is_snooze_enabled ?? false,
+        snooze_time_minutes: userSettings.snooze_time_minutes ?? 10,
+        snooze_count_limit: userSettings.snooze_count_limit ?? 3,
         is_subscribed: req.user?.isSelfTenant ? true : subscriptionStatus.is_subscribed,
         // is_subscribed: true,
         is_free_trial: subscriptionStatus.is_free_trial,
@@ -172,7 +175,7 @@ export const updateUserSettings = async (req, res) => {
   try {
     const userId = req.user.id;
     const body = req.body || {};
-    const { ai_model, api_key, is_show_phone_no, notification_tone, notifications_enabled, theme_color, user_bubble_color, contact_bubble_color, bg_color, user_text_color, contact_text_color, payment_success_message, payment_failed_message, payment_reminder_enabled, payment_reminder_delay, payment_reminder_unit, payment_reminder_message, disable_admin_quick_reply, whatsapp_optout_keyword, whatsapp_optin_keyword, whatsapp_unsubscribe_message, whatsapp_resubscribe_message, catalog_payment_link_enabled, catalog_payment_link_automatic, catalog_payment_link_gateway } = body;
+    const { ai_model, api_key, is_show_phone_no, notification_tone, notifications_enabled, is_snooze_enabled, snooze_time_minutes, snooze_count_limit, theme_color, user_bubble_color, contact_bubble_color, bg_color, user_text_color, contact_text_color, payment_success_message, payment_failed_message, payment_reminder_enabled, payment_reminder_delay, payment_reminder_unit, payment_reminder_message, disable_admin_quick_reply, whatsapp_optout_keyword, whatsapp_optin_keyword, whatsapp_unsubscribe_message, whatsapp_resubscribe_message, catalog_payment_link_enabled, catalog_payment_link_automatic, catalog_payment_link_gateway } = body;
 
     const user = await User.findById(userId);
     if (!user) {
@@ -194,6 +197,9 @@ export const updateUserSettings = async (req, res) => {
         userSettings.is_show_phone_no = is_show_phone_no;
       if (notification_tone !== undefined) userSettings.notification_tone = notification_tone;
       if (notifications_enabled !== undefined) userSettings.notifications_enabled = notifications_enabled;
+      if (is_snooze_enabled !== undefined) userSettings.is_snooze_enabled = is_snooze_enabled;
+      if (snooze_time_minutes !== undefined) userSettings.snooze_time_minutes = snooze_time_minutes;
+      if (snooze_count_limit !== undefined) userSettings.snooze_count_limit = snooze_count_limit;
 
       if (theme_color !== undefined) userSettings.theme_color = theme_color;
       if (user_bubble_color !== undefined) userSettings.user_bubble_color = user_bubble_color;
@@ -234,6 +240,9 @@ export const updateUserSettings = async (req, res) => {
         is_show_phone_no: is_show_phone_no ?? false,
         notification_tone: notification_tone ?? 'default',
         notifications_enabled: notifications_enabled ?? true,
+        is_snooze_enabled: is_snooze_enabled ?? false,
+        snooze_time_minutes: snooze_time_minutes ?? 10,
+        snooze_count_limit: snooze_count_limit ?? 3,
         theme_color: theme_color ?? '#128C7E',
         user_bubble_color: user_bubble_color ?? '#DCF8C6',
         contact_bubble_color: contact_bubble_color ?? '#FFFFFF',
@@ -273,6 +282,9 @@ export const updateUserSettings = async (req, res) => {
       data: {
         notification_tone: userSettings.notification_tone ?? 'default',
         notifications_enabled: userSettings.notifications_enabled ?? true,
+        is_snooze_enabled: userSettings.is_snooze_enabled ?? false,
+        snooze_time_minutes: userSettings.snooze_time_minutes ?? 10,
+        snooze_count_limit: userSettings.snooze_count_limit ?? 3,
         is_subscribed: req.user?.isSelfTenant ? true : subscriptionStatus.is_subscribed,
         is_free_trial: subscriptionStatus.is_free_trial,
         free_trial_days_remaining:

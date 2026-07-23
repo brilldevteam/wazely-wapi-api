@@ -63,6 +63,7 @@ class AutomatedResponseWorker {
             const waitingContacts = await Contact.find({
                 created_by: phone.user_id,
                 deleted_at: null,
+                source: { $in: ['whatsapp', 'baileys'] },
                 last_incoming_message_at: { $ne: null },
                 $or: [
                     { last_outgoing_message_at: null },
@@ -83,6 +84,7 @@ class AutomatedResponseWorker {
                     userId: phone.user_id,
                     whatsappPhoneNumberId: phone._id
                 });
+                await Contact.updateOne({ _id: contact._id }, { last_outgoing_message_at: new Date(), snooze_count: 0, is_snoozed: false });
             }
         } catch (error) {
             console.error(`Error handling delayed replies for WABA ${config.waba_id}:`, error);
@@ -104,6 +106,7 @@ class AutomatedResponseWorker {
             const contactsToReengage = await Contact.find({
                 created_by: phone.user_id,
                 deleted_at: null,
+                source: { $in: ['whatsapp', 'baileys'] },
                 last_incoming_message_at: { $gte: reengageStart, $lte: reengageEnd },
                 $or: [
                     { last_outgoing_message_at: null },
@@ -132,6 +135,7 @@ class AutomatedResponseWorker {
                     userId: phone.user_id,
                     whatsappPhoneNumberId: phone._id
                 });
+                await Contact.updateOne({ _id: contact._id }, { last_outgoing_message_at: new Date(), snooze_count: 0, is_snoozed: false });
             }
         } catch (error) {
             console.error(`Error handling re-engagements for WABA ${config.waba_id}:`, error);

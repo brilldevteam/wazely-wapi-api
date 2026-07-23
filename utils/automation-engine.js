@@ -1,9 +1,10 @@
-import { AutomationFlow, AutomationExecution, Contact, EcommerceOrder, Message, WhatsappPhoneNumber, Template, Tag, ContactTag, ChatAssignment, Chatbot, ReplyMaterial } from '../models/index.js';
+import { AutomationFlow, AutomationExecution, Contact, EcommerceOrder, Message, WhatsappPhoneNumber, Template, Tag, ContactTag, ChatAssignment, Chatbot, ReplyMaterial, EcommerceProduct } from '../models/index.js';
 import unifiedWhatsAppService from '../services/whatsapp/unified-whatsapp.service.js';
 import BusinessAPIProvider from '../services/whatsapp/providers/business-api.provider.js';
 
 const businessApiProvider = new BusinessAPIProvider();
-import { getSheetsClient, getCalendarClient, handleGoogleApiError } from './google-api-helper.js';
+import { getSheetsClient, getCalendarClient, getFormsClient, handleGoogleApiError } from './google-api-helper.js';
+import { handleSequenceReply } from './automated-response.service.js';
 import { PROVIDER_TYPES } from '../services/whatsapp/unified-whatsapp.service.js';
 import appointmentService from '../services/appointment.service.js';
 import automationCache from './automation-cache.js';
@@ -14,6 +15,118 @@ class AutomationEngine {
     this.runningExecutions = new Map();
     this.eventListeners = new Map();
     this.initializeEventListeners();
+    this.startTimeoutWorker();
+  }
+
+  startTimeoutWorker() {
+    setInterval(() => {
+      this.processTimeouts().catch(err => console.error('Error in timeout worker:', err));
+    }, 60 * 1000);
+  }
+
+  async processTimeouts() {
+    try {
+      const timedOutExecutions = await AutomationExecution.find({
+        status: 'waiting',
+        timeout_at: { $lte: new Date() }
+      });
+
+      if (timedOutExecutions.length === 0) return;
+
+      console.log(`[Flow Engine Worker] Found ${timedOutExecutions.length} timed-out executions.`);
+
+      for (const execution of timedOutExecutions) {
+        try {
+          const flow = await AutomationFlow.findById(execution.flow_id);
+          if (!flow || !flow.is_active || flow.deleted_at) {
+            await AutomationExecution.findByIdAndUpdate(execution._id, { status: 'cancelled', completed_at: new Date() });
+            continue;
+          }
+
+          if (flow.is_paused) {
+            continue;
+          }
+
+          const waitingNode = flow.nodes.find(n => n.id === execution.waiting_for_node_id);
+          if (!waitingNode) {
+            await AutomationExecution.findByIdAndUpdate(execution._id, { status: 'failed', error: 'Waiting node not found', completed_at: new Date() });
+            continue;
+          }
+
+          let nextNodeId = null;
+          let currentData = { ...execution.input_data };
+          currentData.executionId = execution._id;
+          const fallbackRoute = waitingNode.parameters?.fallback_route;
+
+          if (fallbackRoute) {
+            const connection = flow.connections.find(c => c.source === waitingNode.id && c.sourceHandle === fallbackRoute);
+            if (connection) {
+              nextNodeId = connection.target;
+              currentData.__nextHandle = fallbackRoute;
+            }
+          }
+
+          await AutomationExecution.findByIdAndUpdate(execution._id, {
+            status: 'running',
+            contact_identifier: null
+          });
+
+          if (!nextNodeId) {
+            await AutomationExecution.findByIdAndUpdate(execution._id, { status: 'success', completed_at: new Date() });
+            continue;
+          }
+
+          const nextNode = flow.nodes.find(n => n.id === nextNodeId);
+          if (nextNode) {
+            console.log(`[Flow Engine Worker] Resuming execution ${execution._id} via timeout route to ${nextNodeId}`);
+
+            const executionLog = execution.execution_log || [];
+            const executionId = uuidv4();
+            this.runningExecutions.set(executionId, execution._id);
+
+            const startTime = Date.now();
+            const nodeResult = await this.executeNode(nextNode, flow, currentData, executionLog);
+
+            if (nodeResult.status === 'waiting') {
+              this.runningExecutions.delete(executionId);
+              continue;
+            }
+
+            if (nodeResult.success) {
+              const updatedData = { ...currentData, ...nodeResult.output };
+              const connResult = await this.processConnectedNodes(flow, nextNode, updatedData, executionLog, currentData);
+              if (connResult && connResult.status === 'waiting') {
+                this.runningExecutions.delete(executionId);
+                continue;
+              }
+              if (connResult && connResult.success) {
+                currentData = connResult.output;
+              } else {
+                currentData = updatedData;
+              }
+            }
+
+            await AutomationExecution.findByIdAndUpdate(execution._id, {
+              status: nodeResult.success ? 'success' : 'failed',
+              output_data: currentData,
+              execution_time: Date.now() - startTime,
+              completed_at: new Date(),
+              execution_log: executionLog
+            });
+
+            await this.updateFlowStatistics(flow._id, nodeResult.success);
+            this.runningExecutions.delete(executionId);
+          } else {
+            await AutomationExecution.findByIdAndUpdate(execution._id, { status: 'success', completed_at: new Date() });
+          }
+        } catch (execErr) {
+          console.error(`[Flow Engine Worker] Error processing timeout for execution ${execution._id}:`, execErr);
+          await AutomationExecution.findByIdAndUpdate(execution._id, { status: 'failed', error: execErr.message, completed_at: new Date() });
+        }
+      }
+    } catch (err) {
+      console.error('[Flow Engine Worker] Core loop error:', err);
+    }
   }
 
 
@@ -53,7 +166,7 @@ class AutomationEngine {
 
       const workspaceTriggers = triggers.filter(t => {
         const triggerWorkspaceId = t.workspace_id ? t.workspace_id.toString() : null;
-        return !triggerWorkspaceId || !incomingWorkspaceId || triggerWorkspaceId === incomingWorkspaceId;
+        return !triggerWorkspaceId || triggerWorkspaceId === incomingWorkspaceId;
       });
 
       const orderTriggers = workspaceTriggers.filter(t => t.event_type === 'order_received');
@@ -69,7 +182,7 @@ class AutomationEngine {
           }
         }
 
-        if (flow && flow.is_active && !flow.deleted_at) {
+        if (flow && flow.is_active && !flow.is_paused && !flow.deleted_at) {
           const shouldExecute = this.checkOrderTriggerConditions(flow, eventData);
           console.log(`Should execute order flow: ${shouldExecute}`);
           if (shouldExecute) {
@@ -123,7 +236,8 @@ class AutomationEngine {
     try {
       console.log("=====================handleMessageReceived called", eventData);
       const { message, senderNumber, recipientNumber, userId, messageType, interactive_id } = eventData;
-      const normalizedMessagePayload = this.normalizeMessagePayload(message);
+      const effectiveMessage = interactive_id || message;
+      const normalizedMessagePayload = this.normalizeMessagePayload(effectiveMessage);
 
       let contact = null;
       try {
@@ -157,7 +271,7 @@ class AutomationEngine {
 
       const workspaceTriggers = triggers.filter(t => {
         const triggerWorkspaceId = t.workspace_id ? t.workspace_id.toString() : null;
-        return !triggerWorkspaceId || !incomingWorkspaceId || triggerWorkspaceId === incomingWorkspaceId;
+        return !triggerWorkspaceId || triggerWorkspaceId === incomingWorkspaceId;
       });
 
       const messageTriggers = workspaceTriggers.filter((t, i, arr) => t.event_type === 'message_received' && arr.findIndex(tt => String(tt.flow_id) === String(t.flow_id) && tt.event_type === 'message_received') === i);
@@ -182,15 +296,23 @@ class AutomationEngine {
       if (waitingExecution) {
         console.log(`Found waiting execution ${waitingExecution._id} for ${senderNumber}. Resuming...`);
         const flow = await AutomationFlow.findById(waitingExecution.flow_id).populate('user_id');
-        if (flow) {
+        if (flow && flow.is_active && !flow.is_paused && !flow.deleted_at) {
           const flowPlatform = flow.platform || 'whatsapp';
           if (flowPlatform === 'all' || flowPlatform === incomingPlatform) {
-            return await this.resumeExecution(flow, waitingExecution, eventData, normalizedMessagePayload);
+            const resumeResult = await this.resumeExecution(flow, waitingExecution, eventData, normalizedMessagePayload);
+            if (resumeResult && resumeResult.notMatched) {
+              console.log('[handleMessageReceived] resumeExecution did not match waiting node. Falling back to trigger evaluation.');
+            } else {
+              return resumeResult;
+            }
           } else {
             console.log(`Skipping waiting execution flow ${flow.name} because platform ${flowPlatform} does not match incoming ${incomingPlatform}`);
           }
         }
       }
+
+      let bestFlowToExecute = null;
+      let bestFlowWeight = 999;
 
       for (const trigger of messageTriggers) {
         console.log(`Processing trigger:`, trigger);
@@ -203,7 +325,7 @@ class AutomationEngine {
           }
         }
 
-        if (flow && flow.is_active && !flow.deleted_at) {
+        if (flow && flow.is_active && !flow.is_paused && !flow.deleted_at) {
           const flowPlatform = flow.platform || 'whatsapp';
           if (flowPlatform !== 'all' && flowPlatform !== incomingPlatform) {
             console.log(`Skipping flow ${flow.name} (${flowPlatform}) for incoming message on platform ${incomingPlatform}`);
@@ -211,31 +333,37 @@ class AutomationEngine {
           }
 
           console.log(`Checking conditions for flow:`, flow.name);
-          const shouldExecute = this.checkMessageTriggerConditions(flow, message, senderNumber, recipientNumber, messageType, null, eventData, normalizedMessagePayload);
-          console.log(`Should execute flow: ${shouldExecute}`);
-          if (shouldExecute) {
-            console.log(`Executing flow: ${flow.name} for message: ${message}`);
-            await this.executeFlow(flow, {
-              event_type: 'message_received',
-              message,
-              interactive_id,
-              messagePayload: normalizedMessagePayload,
-              senderNumber,
-              recipientNumber,
-              userId,
-              messageType,
-              contactId: eventData.contactId || contact?._id?.toString() || null,
-              contact,
-              whatsappPhoneNumberId: eventData.whatsappPhoneNumberId,
-              timestamp: new Date()
-            });
-            break;
+          const { match, weight } = this.checkMessageTriggerConditions(flow, effectiveMessage, senderNumber, recipientNumber, messageType, null, eventData, normalizedMessagePayload);
+          console.log(`Should execute flow: ${match} (weight: ${weight})`);
+          if (match) {
+            if (weight < bestFlowWeight) {
+              bestFlowToExecute = flow;
+              bestFlowWeight = weight;
+            }
           } else {
             console.log(`Flow conditions not met for: ${flow.name}`);
           }
         } else {
           console.log(`Flow not active or deleted:`, flow?.name);
         }
+      }
+
+      if (bestFlowToExecute) {
+        console.log(`Executing flow: ${bestFlowToExecute.name} for message: ${effectiveMessage}`);
+        await this.executeFlow(bestFlowToExecute, {
+          event_type: 'message_received',
+          message: effectiveMessage,
+          interactive_id,
+          messagePayload: normalizedMessagePayload,
+          senderNumber,
+          recipientNumber,
+          userId,
+          messageType,
+          contactId: eventData.contactId || contact?._id?.toString() || null,
+          contact,
+          whatsappPhoneNumberId: eventData.whatsappPhoneNumberId,
+          timestamp: new Date()
+        });
       }
     } catch (error) {
       console.error('Error handling message received event:', error);
@@ -255,33 +383,63 @@ class AutomationEngine {
       senderNumber,
       recipientNumber,
       messageType,
-      eventType: "messageReceived"
+      eventType: "messageReceived",
+      event_type: "message_received"
     };
 
     if (eventData && eventData.whatsappPhoneNumberId) {
       dataObject.whatsappPhoneNumberId = eventData.whatsappPhoneNumberId;
     }
 
+    let matched = false;
+    let bestWeight = 999;
+
     for (const trigger of triggers) {
       const conditions = trigger.conditions || {};
       console.log(`Checking conditions:`, conditions);
 
-      if (Object.keys(conditions).length === 0) {
-        console.log('No conditions specified, triggering flow for all messages');
-        return true;
+      let weight = 4;
+      if (conditions.operator === 'equals') weight = 1;
+      else if (conditions.operator === 'starts_with') weight = 2;
+      else if (conditions.operator === 'contains_any') weight = 3;
+
+      if (Object.keys(conditions).length === 0 || (conditions.field === 'event_type' && conditions.value === 'message_received')) {
+        const triggerNode = flow.nodes?.find(n => n.type === 'trigger');
+        if (triggerNode) {
+          const triggerType = triggerNode.parameters?.triggerType;
+          if (triggerType && triggerType !== 'any message') {
+            console.log(`Flow ${flow.name} triggerType is ${triggerType} but conditions are empty. Skipping.`);
+            continue;
+          }
+          if (!triggerType) {
+            console.log(`Flow ${flow.name} trigger node has no triggerType specified (sub-flow or unconfigured). Skipping.`);
+            continue;
+          }
+        } else {
+          console.log(`Flow ${flow.name} has no trigger node. Skipping direct message trigger.`);
+          continue;
+        }
+
+        console.log('No specific conditions specified, triggering flow for all messages (weight 4)');
+        matched = true;
+        if (weight < bestWeight) bestWeight = weight;
+        continue;
       }
 
       const result = this.evaluateCondition(conditions, dataObject);
 
       console.log(`Condition evaluation result: ${result}`);
       if (result) {
-        console.log(`All conditions met for flow: ${flow.name}`);
-        return true;
+        console.log(`All conditions met for flow: ${flow.name} with weight: ${weight}`);
+        matched = true;
+        if (weight < bestWeight) bestWeight = weight;
       }
     }
 
-    console.log(`No matching triggers found for flow: ${flow.name}`);
-    return false;
+    if (!matched) {
+      console.log(`No matching triggers found for flow: ${flow.name}`);
+    }
+    return { match: matched, weight: bestWeight };
   }
 
 
@@ -308,9 +466,10 @@ class AutomationEngine {
 
       this.runningExecutions.set(executionId, execution._id);
 
-      const result = await this.processWorkflow(flow, execution, { ...inputData, flow_id: flow._id });
+      const result = await this.processWorkflow(flow, execution, { ...inputData, flow_id: flow._id, executionId: execution._id });
 
       if (result.status === 'waiting') {
+        this.runningExecutions.delete(executionId);
         return result;
       }
 
@@ -351,7 +510,7 @@ class AutomationEngine {
     const executionLog = [];
     let currentData = { ...inputData };
 
-    const startNodes = this.getStartNodes(flow);
+    const startNodes = this.getStartNodes(flow, inputData);
     for (const node of startNodes) {
 
       const nodeResult = await this.executeNode(node, flow, currentData, executionLog);
@@ -369,6 +528,9 @@ class AutomationEngine {
         if (workflowResult && workflowResult.status === 'waiting') {
           return workflowResult;
         }
+        if (workflowResult && workflowResult.success) {
+          currentData = workflowResult.output;
+        }
       }
     }
 
@@ -383,15 +545,98 @@ class AutomationEngine {
   }
 
 
-  getStartNodes(flow) {
+  getStartNodes(flow, inputData = null) {
     const connectedTargets = new Set();
     flow.connections.forEach(conn => {
       connectedTargets.add(conn.target);
     });
 
-    return flow.nodes.filter(node => !connectedTargets.has(node.id) && node.type === 'trigger');
-  }
+    const triggerNodes = flow.nodes.filter(node => node.type === 'trigger');
 
+    let startNodes = [];
+    if (triggerNodes.length > 0) {
+      startNodes = triggerNodes.filter(node => !connectedTargets.has(node.id));
+    } else {
+      startNodes = flow.nodes.filter(node => !connectedTargets.has(node.id) && node.type === 'trigger');
+    }
+
+    if (inputData && startNodes.length > 0) {
+      const matchedNodes = [];
+      for (const node of startNodes) {
+        const { triggerType, keywords, conditions } = node.parameters || {};
+
+        if (triggerType) {
+          let condObj = null;
+          if (triggerType === 'order received') {
+            condObj = { field: 'event_type', operator: 'equals', value: 'order_received' };
+          } else if (triggerType === 'any message') {
+            condObj = { field: 'event_type', operator: 'equals', value: 'message_received' };
+          } else {
+            const operatorMap = {
+              "contains keyword": "contains_any",
+              "on exact match": "equals",
+              "starts with": "starts_with"
+            };
+            condObj = {
+              field: 'message',
+              operator: operatorMap[triggerType] || 'contains_any',
+              value: keywords || []
+            };
+          }
+
+          const dataObject = {
+            message: inputData.message || inputData.messagePayload,
+            interactive_id: inputData.interactive_id,
+            senderNumber: inputData.senderNumber,
+            recipientNumber: inputData.recipientNumber,
+            messageType: inputData.messageType,
+            eventType: inputData.event_type || 'message_received',
+            event_type: inputData.event_type || 'message_received'
+          };
+
+          let matched = this.evaluateCondition(condObj, dataObject);
+          if (!matched && flow.triggers) {
+            for (const t of flow.triggers) {
+              if (t.event_type === 'message_received' && t.conditions) {
+                if (this.evaluateCondition(t.conditions, dataObject)) {
+                  matched = true;
+                  break;
+                }
+              }
+            }
+          }
+          if (matched) {
+            matchedNodes.push(node);
+          }
+        } else if (Array.isArray(conditions) && conditions.length > 0) {
+          // For backend generated triggers
+          const dataObject = {
+            message: inputData.message || inputData.messagePayload,
+            interactive_id: inputData.interactive_id,
+            senderNumber: inputData.senderNumber,
+            recipientNumber: inputData.recipientNumber,
+            messageType: inputData.messageType,
+            eventType: inputData.event_type || 'message_received',
+            event_type: inputData.event_type || 'message_received'
+          };
+          let matched = false;
+          for (const cond of conditions) {
+            if (this.evaluateCondition(cond, dataObject)) {
+              matched = true;
+              break;
+            }
+          }
+          if (matched) matchedNodes.push(node);
+        } else {
+          // If no specific trigger conditions, assume it matches
+          matchedNodes.push(node);
+        }
+      }
+      return matchedNodes;
+    }
+
+    return startNodes;
+  }
 
   async processConnectedNodes(flow, currentNode, currentData, executionLog, originalInputData = {}) {
     const nextHandle = currentData.__nextHandle || null;
@@ -399,11 +644,66 @@ class AutomationEngine {
       delete currentData.__nextHandle;
     }
 
+    if (!nextHandle) {
+      const hasInteractiveBranches = flow.connections.some(c =>
+        (c.source === currentNode.id && c.sourceHandle && (c.sourceHandle.startsWith('src-btn-') || c.sourceHandle.startsWith('src-item-'))) ||
+        (c.target && (c.target.startsWith(`cond-btn-___${currentNode.id}___`) || c.target.startsWith(`cond-list-___${currentNode.id}___`)))
+      );
+
+      if (hasInteractiveBranches) {
+        const executionId = currentData.executionId;
+        if (executionId) {
+          // Find a fallback non-interactive next node (e.g. condition/action connected without a btn handle)
+          // so resumeExecution can continue even if button index matching fails.
+          const fallbackConnection = flow.connections.find(c =>
+            c.source === currentNode.id &&
+            (!c.sourceHandle || (!c.sourceHandle.startsWith('src-btn-') && !c.sourceHandle.startsWith('src-item-')))
+          );
+          const fallbackNextNodeId = fallbackConnection ? fallbackConnection.target : null;
+
+          await AutomationExecution.findByIdAndUpdate(executionId, {
+            status: 'waiting',
+            waiting_for_node_id: currentNode.id,
+            next_node_id: fallbackNextNodeId,
+            contact_identifier: currentData.senderNumber || currentData.phone_number || currentData.recipientNumber,
+            input_data: currentData
+          });
+          return { success: true, status: 'waiting', output: currentData, executionLog };
+        }
+      }
+    }
+
+    // Auto-wait: if the current node is send_message and the next node is a condition,
+    // pause and wait for user reply before evaluating the condition.
+    // Skip during resumed executions (is_resuming=true) so Logic Control branch
+    // Send Messages can flow straight through to ask_and_wait nodes.
+    const CONDITION_TYPES = ['advanced_condition', 'condition'];
+    if (!currentData.is_test && !currentData.is_resuming && currentNode.type === 'send_message') {
+      const nextNodes = this.getConnectedNodes(flow, currentNode.id, nextHandle);
+      const conditionNext = nextNodes.find(n => CONDITION_TYPES.includes(n.type));
+      if (conditionNext) {
+        const executionId = currentData.executionId;
+        if (executionId) {
+          console.log(`[Flow Engine] Auto-wait: send_message → ${conditionNext.type}. Pausing for user reply before evaluating condition.`);
+          await AutomationExecution.findByIdAndUpdate(executionId, {
+            status: 'waiting',
+            waiting_for_node_id: currentNode.id,
+            next_node_id: conditionNext.id,
+            contact_identifier: currentData.senderNumber || currentData.phone_number || currentData.recipientNumber,
+            input_data: currentData
+          });
+          return { success: true, status: 'waiting', output: currentData, executionLog };
+        }
+      }
+    }
+
     const connectedNodes = this.getConnectedNodes(flow, currentNode.id, nextHandle);
+    console.log(`[Flow Chain] Node "${currentNode.name || currentNode.id}" (${currentNode.type}) → next: [${connectedNodes.map(n => `"${n.name || n.id}"(${n.type})`).join(', ')}] handle="${nextHandle || 'none'}"`);
 
     for (const node of connectedNodes) {
       const nodeResult = await this.executeNode(node, flow, currentData, executionLog);
       if (nodeResult.status === 'waiting') {
+        console.log(`[Flow Chain] Node "${node.name || node.id}" (${node.type}) returned WAITING — propagating up.`);
         return { success: true, status: 'waiting', output: currentData, executionLog };
       }
       if (nodeResult.success) {
@@ -413,12 +713,20 @@ class AutomationEngine {
           userId: currentData.userId || originalInputData.userId || originalInputData.user_id
         };
 
+        currentData = updatedData;
+
         const result = await this.processConnectedNodes(flow, node, updatedData, executionLog, originalInputData);
         if (result && result.status === 'waiting') {
           return result;
         }
+        if (result && result.success) {
+          currentData = result.output;
+        }
+      } else {
+        console.log(`[Flow Chain] Node "${node.name || node.id}" (${node.type}) FAILED: ${nodeResult.error}`);
       }
     }
+    return { success: true, output: currentData };
   }
 
 
@@ -427,6 +735,10 @@ class AutomationEngine {
       if (conn.source !== nodeId) return false;
       if (sourceHandle && conn.sourceHandle) {
         return conn.sourceHandle === sourceHandle;
+      }
+      // If no specific sourceHandle is requested, exclude interactive branches
+      if (!sourceHandle && conn.sourceHandle && (conn.sourceHandle.startsWith('src-btn-') || conn.sourceHandle.startsWith('src-item-'))) {
+        return false;
       }
       return !sourceHandle;
     });
@@ -458,6 +770,9 @@ class AutomationEngine {
           break;
         case 'condition':
           result = await this.executeConditionNode(node, inputData);
+          break;
+        case 'advanced_condition':
+          result = await this.executeAdvancedConditionNode(node, flow, inputData);
           break;
         case 'action':
           result = await this.executeActionNode(node, inputData);
@@ -504,8 +819,15 @@ class AutomationEngine {
         case 'save_to_google_sheet':
           result = await this.executeSaveToGoogleSheetNode(node, inputData);
           break;
+
+        case 'send_google_form':
+          result = await this.executeSendGoogleFormNode(node, inputData);
+          break;
         case 'create_calendar_event':
           result = await this.executeCreateCalendarEventNode(node, inputData);
+          break;
+        case 'create_google_meet':
+          result = await this.executeCreateGoogleMeetNode(node, inputData);
           break;
         case 'update_contact':
           result = await this.executeUpdateContactNode(node, inputData);
@@ -516,8 +838,17 @@ class AutomationEngine {
         case 'appointment_flow':
           result = await this.executeAppointmentFlowNode(node, flow, inputData, executionLog);
           break;
+        case 'send_sequence':
+          result = await this.executeSendSequenceNode(node, inputData);
+          break;
+        case 'run_sub_flow':
+          result = await this.executeRunSubFlowNode(node, flow, inputData, executionLog);
+          break;
         case 'wait_for_reply':
           result = await this.executeWaitForReplyNode(node, flow, inputData, executionLog);
+          break;
+        case 'ask_and_wait':
+          result = await this.executeAskAndWaitNode(node, flow, inputData, executionLog);
           break;
         case 'form_flow':
           result = await this.executeFormFlowNode(node, inputData);
@@ -527,6 +858,14 @@ class AutomationEngine {
           break;
         case 'api':
           result = await this.executeApiNode(node, inputData);
+          break;
+        case 'send_product':
+        case 'send_catalog':
+        case 'send_shopify':
+          result = await this.executeSendProductNode(node, inputData);
+          break;
+        case 'move_to_pipeline_stage':
+          result = await this.executeMoveToPipelineStageNode(node, inputData);
           break;
         case 'custom':
           result = await this.executeCustomNode(node, inputData);
@@ -622,6 +961,62 @@ class AutomationEngine {
   }
 
 
+  async executeAdvancedConditionNode(node, flow, inputData) {
+    const { match_type = 'AND', rules = [] } = node.parameters || {};
+
+    try {
+      let trueHandle = 'true';
+      let falseHandle = 'false';
+
+      if (flow && flow.connections) {
+        const connections = flow.connections.filter(c => c.source === node.id);
+        if (connections.some(c => c.sourceHandle === 'if-true')) {
+          trueHandle = 'if-true';
+          falseHandle = 'if-false';
+        } else if (connections.some(c => c.sourceHandle === 'condition-true')) {
+          trueHandle = 'condition-true';
+          falseHandle = 'condition-false';
+        }
+      }
+
+      if (!Array.isArray(rules) || rules.length === 0) {
+        const output = { ...inputData, conditionMatched: true };
+        output.__nextHandle = trueHandle;
+        return { success: true, output };
+      }
+
+      let isMatch = match_type === 'OR' ? false : true;
+
+      for (const rule of rules) {
+        const condObj = { field: rule.field, operator: rule.operator, value: rule.value };
+        const result = this.evaluateCondition(condObj, inputData);
+
+        if (match_type === 'OR') {
+          if (result) {
+            isMatch = true;
+            break;
+          }
+        } else {
+          if (!result) {
+            isMatch = false;
+            break;
+          }
+        }
+      }
+
+      const output = {
+        ...inputData,
+        conditionMatched: isMatch
+      };
+
+      output.__nextHandle = isMatch ? trueHandle : falseHandle;
+
+      return { success: true, output };
+    } catch (error) {
+      return { success: false, output: {}, error: error.message };
+    }
+  }
+
   evaluateCondition(condition, data) {
     let { field, operator, value } = condition;
 
@@ -629,82 +1024,123 @@ class AutomationEngine {
       field = 'message';
     }
 
-    if (!field || !operator || value === undefined) {
+    if (!field || !operator) {
       return false;
     }
 
-    const fieldValue = (field === 'message' && typeof data.interactive_id === 'string' && data.interactive_id)
+    if (value === undefined && !['exists', 'is_empty', 'is_not_empty'].includes(operator)) {
+      return false;
+    }
+
+    const matched = this.evaluateSingleValue(field, operator, value, this.getFieldValue(field, data));
+    if (matched) return true;
+
+    // Fallback: If it's a message field and textContent is available, try matching against textContent
+    if ((field === 'message' || field === 'message.body' || (typeof field === 'string' && field.startsWith('message.'))) && data.textContent) {
+      return this.evaluateSingleValue(field, operator, value, data.textContent);
+    }
+
+    return false;
+  }
+
+  getFieldValue(field, data) {
+    return (field === 'message' && typeof data.interactive_id === 'string' && data.interactive_id)
       ? data.interactive_id
       : this.getNestedValue(data, field);
+  }
 
+  evaluateSingleValue(field, operator, value, fieldValue) {
     const strField = String(fieldValue ?? '').toLowerCase();
-    const strValue = String(value ?? '').toLowerCase();
+    const strFieldExact = String(fieldValue ?? '');
+    const valueArray = Array.isArray(value) ? value : [value];
+
+    const cleanSystemPrefixes = (val) => {
+      if (typeof val !== 'string') return val;
+      let current = val;
+      let previous;
+      do {
+        previous = current;
+        current = current.replace(/^(f[0-9a-f]{6}|new[a-z0-9]+)___/i, '');
+      } while (current !== previous);
+      return current;
+    };
 
     const getSuffix = (valStr) => {
-      if (typeof valStr === 'string' && valStr.includes('___')) {
-        return valStr.split('___').slice(1).join('___').toLowerCase();
+      if (typeof valStr === 'string') {
+        return cleanSystemPrefixes(valStr).toLowerCase();
       }
-      return valStr.toLowerCase();
+      return '';
+    };
+
+    const getSuffixExact = (valStr) => {
+      if (typeof valStr === 'string') {
+        return cleanSystemPrefixes(valStr);
+      }
+      return '';
     };
 
     switch (operator) {
-      case 'equals': {
-        if (strField.includes('___') || strValue.includes('___')) {
-          return getSuffix(strField) === getSuffix(strValue);
-        }
-        return strField === strValue;
+      case 'equals':
+      case 'equals_any': {
+        return valueArray.some(v => {
+          const strValueExact = String(v ?? '');
+          const strValueLower = strValueExact.toLowerCase();
+          if (strFieldExact.includes('___') || strValueExact.includes('___')) {
+            return getSuffixExact(strFieldExact).toLowerCase() === getSuffixExact(strValueExact).toLowerCase();
+          }
+          return strField === strValueLower;
+        });
       }
       case 'not_equals': {
-        if (strField.includes('___') || strValue.includes('___')) {
-          return getSuffix(strField) !== getSuffix(strValue);
-        }
-        return strField !== strValue;
+        return valueArray.every(v => {
+          const strValueExact = String(v ?? '');
+          const strValueLower = strValueExact.toLowerCase();
+          if (strFieldExact.includes('___') || strValueExact.includes('___')) {
+            return getSuffixExact(strFieldExact).toLowerCase() !== getSuffixExact(strValueExact).toLowerCase();
+          }
+          return strField !== strValueLower;
+        });
       }
-      case 'contains': {
-        if (strField.includes('___') || strValue.includes('___')) {
-          return getSuffix(strField).includes(getSuffix(strValue));
-        }
-        return strField.includes(strValue);
+      case 'contains':
+      case 'contains_any': {
+        return valueArray.some(v => {
+          const strValue = String(v ?? '').toLowerCase();
+          if (strField.includes('___') || strValue.includes('___')) {
+            return getSuffix(strField).includes(getSuffix(strValue));
+          }
+          return strField.includes(strValue);
+        });
       }
       case 'not_contains': {
-        if (strField.includes('___') || strValue.includes('___')) {
-          return !getSuffix(strField).includes(getSuffix(strValue));
-        }
-        return !strField.includes(strValue);
+        return valueArray.every(v => {
+          const strValue = String(v ?? '').toLowerCase();
+          if (strField.includes('___') || strValue.includes('___')) {
+            return !getSuffix(strField).includes(getSuffix(strValue));
+          }
+          return !strField.includes(strValue);
+        });
       }
       case 'starts_with':
-        return strField.startsWith(strValue);
+        return valueArray.some(v => strField.startsWith(String(v ?? '').toLowerCase()));
       case 'ends_with':
-        return strField.endsWith(strValue);
+        return valueArray.some(v => strField.endsWith(String(v ?? '').toLowerCase()));
       case 'greater_than':
-        return Number(fieldValue) > Number(value);
+        return Number(fieldValue) > Number(valueArray[0]);
       case 'less_than':
-        return Number(fieldValue) < Number(value);
+        return Number(fieldValue) < Number(valueArray[0]);
       case 'greater_than_or_equal':
-        return Number(fieldValue) >= Number(value);
+        return Number(fieldValue) >= Number(valueArray[0]);
       case 'less_than_or_equal':
-        return Number(fieldValue) <= Number(value);
+        return Number(fieldValue) <= Number(valueArray[0]);
       case 'is_empty':
         return !fieldValue || fieldValue === '';
       case 'is_not_empty':
+      case 'exists':
         return !!fieldValue && fieldValue !== '';
-      case 'contains_any':
-        if (!Array.isArray(value)) {
-          return false;
-        }
-        return value.some(v => {
-          const itemStr = String(v ?? '').toLowerCase();
-          if (strField.includes('___') || itemStr.includes('___')) {
-            return getSuffix(strField) === getSuffix(itemStr);
-          }
-          return strField.includes(itemStr);
-        });
       default:
-        return true;
+        return false;
     }
   }
-
-
   getNestedValue(obj, path) {
     if (!obj || !path) return undefined;
 
@@ -713,10 +1149,10 @@ class AutomationEngine {
       return directValue;
     }
 
-    if (path === 'contact_name') {
+    if (path === 'contact_name' || path === 'sender.name') {
       return obj.contact?.name || obj.senderNumber || 'Customer';
     }
-    if (path === 'phone_number' || path === 'sender_number') {
+    if (path === 'phone_number' || path === 'sender_number' || path === 'sender.phone') {
       return obj.senderNumber || obj.contact?.phone_number;
     }
 
@@ -727,7 +1163,7 @@ class AutomationEngine {
         messageSubPath === 'text.body' ||
         messageSubPath === 'body'
       ) {
-        return obj.message;
+        return obj.textContent || obj.message;
       }
     }
 
@@ -747,6 +1183,13 @@ class AutomationEngine {
       if (customValue !== undefined) {
         return customValue;
       }
+    }
+
+    // Final fallback: if the field wasn't found anywhere and this object has a user reply
+    // (set by auto-wait resume), return that. Handles arbitrary field names in conditions
+    // after a send_message → condition flow pattern.
+    if (obj.__auto_wait_reply !== undefined) {
+      return obj.__auto_wait_reply;
     }
 
     return undefined;
@@ -790,13 +1233,82 @@ class AutomationEngine {
   }
 
 
+  async executeRunSubFlowNode(node, flow, inputData, executionLog) {
+    const { sub_flow_id } = node.parameters || {};
+
+    if (!sub_flow_id) {
+      return { success: false, output: inputData, error: 'sub_flow_id is required' };
+    }
+
+    if (inputData.flow_stack?.includes(sub_flow_id.toString())) {
+      return { success: false, output: inputData, error: 'Circular sub-flow detected' };
+    }
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({ node_id: node.id, type: 'run_sub_flow', sub_flow_id });
+
+      const { AutomationFlow } = await import('../models/index.js');
+      const subFlow = await AutomationFlow.findById(sub_flow_id);
+
+      if (subFlow) {
+        const subResult = await this.processWorkflow(
+          subFlow,
+          null,
+          {
+            ...inputData,
+            is_sub_flow: true,
+            flow_stack: [...(inputData.flow_stack || []), flow._id.toString()]
+          }
+        );
+        if (subResult && subResult.executionLog) {
+          executionLog.push(...subResult.executionLog);
+        }
+        return { success: true, output: subResult.output || inputData };
+      }
+      return { success: true, output: inputData };
+    }
+
+    try {
+      const { AutomationFlow } = await import('../models/index.js');
+      const subFlow = await AutomationFlow.findOne({ _id: sub_flow_id, is_active: true, is_paused: { $ne: true }, deleted_at: null }).populate('user_id');
+
+      if (!subFlow) {
+        console.log(`[Run Sub Flow] Sub-flow ${sub_flow_id} not found, inactive, or paused. Skipping.`);
+        return { success: false, output: inputData, error: 'Sub-flow not found, inactive, or paused' };
+      }
+
+      this.executeFlow(subFlow, {
+        ...inputData,
+        is_sub_flow: true,
+        flow_stack: [...(inputData.flow_stack || []), flow._id.toString()]
+      }).catch(err => console.error('[Run Sub Flow] Execution error:', err));
+
+      return { success: true, output: { ...inputData, sub_flow_triggered: sub_flow_id } };
+    } catch (error) {
+      return { success: false, output: inputData, error: error.message };
+    }
+  }
+
+
   async executeDelayNode(node, inputData) {
-    const { delay_ms } = node.parameters || { delay_ms: 1000 };
+    const { delay_ms } = node.parameters || {};
+    let delay = (delay_ms !== undefined && delay_ms !== null && delay_ms !== '') ? parseInt(delay_ms) : 1000;
+    if (isNaN(delay)) delay = 1000;
+
+    if (inputData.is_test) {
+      if (!inputData.test_responses) inputData.test_responses = [];
+      inputData.test_responses.push({
+        type: 'delay',
+        delay_ms: delay
+      });
+      return { success: true, output: inputData };
+    }
 
     return new Promise((resolve) => {
       setTimeout(() => {
         resolve({ success: true, output: inputData });
-      }, delay_ms);
+      }, delay);
     });
   }
 
@@ -830,6 +1342,12 @@ class AutomationEngine {
 
   async executeWebhookNode(node, inputData) {
     const { url, method, headers, body } = node.parameters || {};
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({ node_id: node.id, type: 'webhook', url, method });
+      return { success: true, output: inputData };
+    }
 
     if (!url) {
       return { success: false, output: inputData, error: 'Webhook URL is required' };
@@ -945,6 +1463,28 @@ class AutomationEngine {
         providerType: provider_type || PROVIDER_TYPES.BUSINESS_API
       };
 
+      if (inputData.is_test) {
+        messageParams.buttonParams = [{ title: processedButton, id: `form_${form_id}` }];
+        inputData.test_responses = inputData.test_responses || [];
+        inputData.test_responses.push({
+          node_id: node.id,
+          type: 'form_flow',
+          message: processedBody,
+          button: processedButton,
+          form_id: form_id,
+          messageParams: messageParams
+        });
+        return {
+          success: true,
+          output: {
+            ...inputData,
+            form_sent: true,
+            sent_to: processedRecipient,
+            message_id: `sim_form_${Date.now()}`
+          }
+        };
+      }
+
       let contactDoc = null;
       const contactId = inputData.contactId || inputData.contact?._id;
       if (contactId) {
@@ -971,6 +1511,7 @@ class AutomationEngine {
         const result = await omnichannelService.sendMessage({
           platform: 'telegram',
           workspace_id: bot.workspace_id,
+          user_id: userId,
           recipient_id: contactDoc.telegram_chat_id,
           message_type: 'text',
           text: `${processedBody}\n\n(Note: Forms/Flows are only supported on WhatsApp)`
@@ -1000,6 +1541,7 @@ class AutomationEngine {
           const formattedMessage = {
             id: newMessage._id.toString(),
             content: newMessage.content,
+            interactiveData: newMessage.interactive_data || null,
             messageType: newMessage.message_type,
             fileUrl: newMessage.file_url || null,
             createdAt: newMessage.wa_timestamp,
@@ -1081,6 +1623,7 @@ class AutomationEngine {
         const result = await omnichannelService.sendMessage({
           platform,
           workspace_id: connection.workspace_id,
+          user_id: userId,
           page_id: pageId,
           recipient_id: recipientId,
           message_type: 'text',
@@ -1111,6 +1654,7 @@ class AutomationEngine {
           const formattedMessage = {
             id: newMessage._id.toString(),
             content: newMessage.content,
+            interactiveData: newMessage.interactive_data || null,
             messageType: newMessage.message_type,
             fileUrl: newMessage.file_url || null,
             createdAt: newMessage.wa_timestamp,
@@ -1193,6 +1737,11 @@ class AutomationEngine {
     }
   }
 
+
+  async executePollNode(node, inputData) {
+    // Forward the poll node to the unified send message handler which has poll parameter processing
+    return await this.executeSendMessageNode(node, inputData);
+  }
 
   async executeSendMessageNode(node, inputData) {
     const {
@@ -1319,6 +1868,24 @@ class AutomationEngine {
         }
       }
 
+      if (inputData.is_test) {
+        inputData.test_responses = inputData.test_responses || [];
+        inputData.test_responses.push({
+          node_id: node.id,
+          type: 'send_message',
+          messageParams: messageParams
+        });
+        return {
+          success: true,
+          output: {
+            ...inputData,
+            message_sent: true,
+            sent_to: processedRecipient,
+            provider: 'simulation',
+            message_id: `sim_msg_${Date.now()}`
+          }
+        };
+      }
 
       let contactDoc = null;
       const contactId = inputData.contactId || inputData.contact?._id;
@@ -1350,21 +1917,24 @@ class AutomationEngine {
         let textToSend = messageParams.messageText;
 
         let buttonsToPass = messageParams.buttonParams || messageParams.buttons;
-        if (msgType === 'interactive' && messageParams.interactiveType === 'list' && messageParams.listParams) {
-          const listItems = messageParams.listParams.items || [];
-          buttonsToPass = listItems.map(item => ({
-            id: item.id || item.title,
-            text: item.title
-          }));
-          if (!textToSend) {
-            textToSend = messageParams.listParams.body || messageParams.listParams.header || "Please select an option:";
+
+        if (msgType === 'interactive') {
+          if (messageParams.interactiveType === 'list' && messageParams.listParams) {
+            const listItems = messageParams.listParams.items || [];
+            buttonsToPass = listItems.map(item => ({
+              id: item.id || item.title,
+              text: item.title
+            }));
+            if (!textToSend) {
+              textToSend = messageParams.listParams.body || messageParams.listParams.header || "Please select an option:";
+            }
           }
-          msgType = 'interactive';
         }
 
         const result = await omnichannelService.sendMessage({
           platform: 'telegram',
           workspace_id: bot.workspace_id,
+          user_id: userId,
           recipient_id: contactDoc.telegram_chat_id,
           message_type: msgType,
           text: textToSend,
@@ -1385,9 +1955,6 @@ class AutomationEngine {
         } : null;
 
         let tgFileUrl = messageParams.mediaUrl || null;
-        if (tgFileUrl && typeof tgFileUrl === 'string' && tgFileUrl.startsWith('http')) {
-          try { tgFileUrl = new URL(tgFileUrl).pathname.replace(/^\//, ''); } catch (_) { }
-        }
 
         const newMessage = await Message.create({
           workspace_id: bot.workspace_id,
@@ -1500,21 +2067,24 @@ class AutomationEngine {
         let textToSend = messageParams.messageText;
 
         let buttonsToPass = messageParams.buttonParams || messageParams.buttons;
-        if (msgType === 'interactive' && messageParams.interactiveType === 'list' && messageParams.listParams) {
-          const listItems = messageParams.listParams.items || [];
-          buttonsToPass = listItems.map(item => ({
-            id: item.id || item.title,
-            text: item.title
-          }));
-          if (!textToSend) {
-            textToSend = messageParams.listParams.body || messageParams.listParams.header || "Please select an option:";
+
+        if (msgType === 'interactive') {
+          if (messageParams.interactiveType === 'list' && messageParams.listParams) {
+            const listItems = messageParams.listParams.items || [];
+            buttonsToPass = listItems.map(item => ({
+              id: item.id || item.title,
+              text: item.title
+            }));
+            if (!textToSend) {
+              textToSend = messageParams.listParams.body || messageParams.listParams.header || "Please select an option:";
+            }
           }
-          msgType = 'interactive';
         }
 
         const result = await omnichannelService.sendMessage({
           platform,
           workspace_id: connection.workspace_id,
+          user_id: userId,
           page_id: pageId,
           recipient_id: recipientId,
           message_type: msgType,
@@ -1536,9 +2106,7 @@ class AutomationEngine {
         } : null;
 
         let fbIgFileUrl = messageParams.mediaUrl || null;
-        if (fbIgFileUrl && typeof fbIgFileUrl === 'string' && fbIgFileUrl.startsWith('http')) {
-          try { fbIgFileUrl = new URL(fbIgFileUrl).pathname.replace(/^\//, ''); } catch (_) { }
-        }
+
 
         const newMessage = await Message.create({
           workspace_id: connection.workspace_id,
@@ -1785,6 +2353,70 @@ class AutomationEngine {
         messageParams.templateVariables.url = this.processTemplateString(url_button_value, inputData);
       }
 
+      if (inputData.is_test) {
+        inputData.test_responses = inputData.test_responses || [];
+
+        let bodyText = template.message_body || '';
+        for (const [key, val] of Object.entries(resolvedBodyVars)) {
+          bodyText = bodyText.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), val);
+        }
+
+        let simText = '';
+        if (template.header && template.header.format === 'text' && template.header.text) {
+          simText += '*' + template.header.text + '*\n\n';
+        }
+        simText += bodyText;
+        if (template.footer_text) {
+          simText += '\n\n_' + template.footer_text + '_';
+        }
+
+        const resolvedCoupon = coupon_code ? this.processTemplateString(coupon_code, inputData) : null;
+        if (resolvedCoupon) {
+          simText += `\n\nCoupon Code: ${resolvedCoupon}`;
+        }
+
+        messageParams.messageText = simText;
+
+        if (!messageParams.mediaUrl && template.header && template.header.format === 'media' && template.header.media_url) {
+          messageParams.mediaUrl = template.header.media_url;
+        }
+
+        if (Array.isArray(template.buttons)) {
+          messageParams.buttonParams = template.buttons.map((btn, index) => {
+            if (btn.type === 'url' || btn.type === 'website') {
+              let btnUrl = btn.url || btn.website_url || '';
+              if (url_button_value) {
+                btnUrl = this.processTemplateString(url_button_value, inputData);
+              }
+              return { title: btn.text, id: btnUrl };
+            }
+            return {
+              title: btn.text,
+              id: btn.value || btn.id || `btn_${index + 1}`
+            };
+          });
+        }
+
+        inputData.test_responses.push({
+          node_id: node.id,
+          type: 'send_template',
+          templateName: template.template_name,
+          messageParams: messageParams
+        });
+        return {
+          success: true,
+          output: {
+            ...inputData,
+            template_sent: true,
+            template_name: template.template_name,
+            template_type: template.template_type,
+            sent_to: processedRecipient,
+            provider: 'simulation',
+            message_id: `sim_tpl_${Date.now()}`
+          }
+        };
+      }
+
       let contactDoc = null;
       const contactId = inputData.contactId || inputData.contact?._id;
       if (contactId) {
@@ -1868,6 +2500,7 @@ class AutomationEngine {
         const result = await omnichannelService.sendMessage({
           platform: 'telegram',
           workspace_id: bot.workspace_id,
+          user_id: userId,
           recipient_id: contactDoc.telegram_chat_id,
           message_type: msgType,
           text: telegramText,
@@ -1900,6 +2533,7 @@ class AutomationEngine {
           const formattedMessage = {
             id: newMessage._id.toString(),
             content: newMessage.content,
+            interactiveData: newMessage.interactive_data || null,
             messageType: newMessage.message_type,
             fileUrl: newMessage.file_url || null,
             createdAt: newMessage.wa_timestamp,
@@ -2039,6 +2673,7 @@ class AutomationEngine {
         const result = await omnichannelService.sendMessage({
           platform,
           workspace_id: connection.workspace_id,
+          user_id: userId,
           page_id: pageId,
           recipient_id: recipientId,
           message_type: msgType,
@@ -2072,6 +2707,7 @@ class AutomationEngine {
           const formattedMessage = {
             id: newMessage._id.toString(),
             content: newMessage.content,
+            interactiveData: newMessage.interactive_data || null,
             messageType: newMessage.message_type,
             fileUrl: newMessage.file_url || null,
             createdAt: newMessage.wa_timestamp,
@@ -2151,23 +2787,15 @@ class AutomationEngine {
     return 'application/octet-stream';
   }
 
-  async executeAddTagNode(node, inputData) {
-    const { tag_name } = node.parameters || {};
-
-    if (!tag_name) {
-      return { success: false, output: inputData, error: 'Tag name is required' };
-    }
-
-
-    return {
-      success: true,
-      output: { ...inputData, tag_added: tag_name }
-    };
-  }
-
 
   async executeUpdateContactNode(node, inputData) {
     const { updates } = node.parameters || {};
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({ node_id: node.id, type: 'update_contact', updates });
+      return { success: true, output: inputData };
+    }
 
     const userId = inputData.userId || inputData.user_id;
     const contactId = inputData.contactId || inputData.contact?._id;
@@ -2187,8 +2815,12 @@ class AutomationEngine {
 
       if (Array.isArray(updates)) {
         for (const update of updates) {
-          const { field_key, value } = update;
+          let { field_key, value } = update;
           if (!field_key) continue;
+
+          if (field_key === 'phone') {
+            field_key = 'phone_number';
+          }
 
           const resolvedValue = typeof value === 'string' ? this.processTemplateString(value, inputData) : value;
 
@@ -2232,6 +2864,12 @@ class AutomationEngine {
 
   async executeAddToSegmentNode(node, inputData) {
     const { segment_id } = node.parameters || {};
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({ node_id: node.id, type: 'add_to_segment', segment_id });
+      return { success: true, output: inputData };
+    }
     const contactId = inputData.contactId || inputData.contact?._id;
     const userId = inputData.userId || inputData.user_id;
 
@@ -2278,6 +2916,12 @@ class AutomationEngine {
     const { mappings } = node.parameters || {};
 
     if (!Array.isArray(mappings) || mappings.length === 0) {
+      return { success: true, output: inputData };
+    }
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({ node_id: node.id, type: 'response_saver', mappings });
       return { success: true, output: inputData };
     }
 
@@ -2342,6 +2986,12 @@ class AutomationEngine {
 
   async executeApiNode(node, inputData) {
     const { url, method, headers, body, response_mapping } = node.parameters || {};
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({ node_id: node.id, type: 'api', url, method });
+      return { success: true, output: inputData };
+    }
 
     if (!url) {
       console.error('[API Node] Error: URL is missing');
@@ -2422,9 +3072,329 @@ class AutomationEngine {
     }
   }
 
+  async executeSendProductNode(node, inputData) {
+    const { product_id, recipient, provider_type } = node.parameters || {};
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({ node_id: node.id, type: node.type || 'send_product', product_id });
+      return { success: true, output: inputData };
+    }
+
+    if (!product_id) {
+      return { success: false, output: inputData, error: 'Product ID is required' };
+    }
+
+    try {
+      let processedRecipient = recipient ? this.processTemplateString(recipient, inputData) : null;
+      const userId = inputData.userId || inputData.user_id;
+
+      if (!userId) {
+        return { success: false, output: inputData, error: 'User ID is required' };
+      }
+
+      const { EcommerceProduct, Contact, Message } = await import('../models/index.js');
+
+      let contactDoc = null;
+      const contactId = inputData.contactId || inputData.contact?._id;
+      if (contactId) {
+        contactDoc = await Contact.findOne({ _id: contactId, created_by: userId, deleted_at: null }).lean();
+      } else if (processedRecipient) {
+        contactDoc = await Contact.findOne({
+          $or: [
+            { phone_number: processedRecipient },
+            { telegram_chat_id: processedRecipient },
+            { facebook_page_scoped_id: processedRecipient },
+            { instagram_scoped_id: processedRecipient }
+          ],
+          created_by: userId,
+          deleted_at: null
+        }).lean();
+      }
+
+      if (!contactDoc && !processedRecipient) {
+        processedRecipient = inputData.senderNumber || inputData.phone_number || inputData.recipientNumber;
+      } else if (contactDoc && !processedRecipient) {
+        processedRecipient = contactDoc.phone_number || contactDoc.telegram_chat_id || contactDoc.instagram_scoped_id || contactDoc.facebook_page_scoped_id;
+      }
+
+      if (!contactDoc && !processedRecipient) {
+        return { success: false, output: inputData, error: 'Recipient could not be determined' };
+      }
+
+      const platform = contactDoc ? contactDoc.source : 'whatsapp';
+
+      const processedProductId = this.processTemplateString(product_id, inputData);
+      const product = await EcommerceProduct.findById(processedProductId).lean();
+
+      if (!product) {
+        return { success: false, output: inputData, error: `Product not found: ${processedProductId}` };
+      }
+
+      const source = product.type || 'whatsapp';
+      if (source === 'whatsapp' && platform !== 'whatsapp') {
+        return { success: false, output: inputData, error: `Catalog products can only be sent on WhatsApp. Target platform: ${platform}` };
+      }
+
+      const product_name = product.name || 'Product Details';
+      const product_price = product.price ? (product.currency ? `${product.currency} ${product.price}` : product.price) : 'N/A';
+      const product_description = product.description || [
+        product.brand ? `Brand: ${product.brand}` : '',
+        product.category ? `Category: ${product.category}` : ''
+      ].filter(Boolean).join(' | ');
+      const product_image = product.image_urls && product.image_urls.length > 0 ? product.image_urls[0] : null;
+      const product_url = product.url || 'https://shopify.com';
+
+      const messageCaption = `*${product_name}*\n*Price:* ${product_price}${product_description ? `\n\n${product_description}` : ''}`;
+
+      const productButton = {
+        type: 'url',
+        text: source === 'whatsapp' || source === 'catalog' ? 'View Catalog' : 'View Product',
+        url: product_url
+      };
+
+      let resolvedMediaUrl = null;
+      if (product_image) {
+        resolvedMediaUrl = businessApiProvider.getPublicMediaUrl(product_image);
+      }
+
+      let lastResult = null;
+
+      if (platform === 'whatsapp' || !contactDoc) {
+        const messageParams = {
+          recipientNumber: processedRecipient,
+          messageType: 'interactive',
+          interactiveType: 'cta_url',
+          messageText: messageCaption.trim(),
+          providerType: provider_type || PROVIDER_TYPES.BUSINESS_API,
+          buttons: [productButton],
+          buttonParams: { display_text: productButton.text, url: productButton.url }
+        };
+
+        if (resolvedMediaUrl) {
+          messageParams.mediaUrl = resolvedMediaUrl;
+          messageParams.file = {
+            originalname: 'media',
+            mimetype: this.getMimeTypeFromUrl(resolvedMediaUrl),
+            buffer: null,
+            url: resolvedMediaUrl
+          };
+        }
+
+        if (inputData.whatsappPhoneNumberId) {
+          const { WhatsappPhoneNumber } = await import('../models/index.js');
+          const whatsappPhoneNumber = await WhatsappPhoneNumber.findById(inputData.whatsappPhoneNumberId).populate('waba_id').lean();
+          if (whatsappPhoneNumber && whatsappPhoneNumber.waba_id) {
+            messageParams.whatsappPhoneNumber = whatsappPhoneNumber;
+          }
+        } else if (inputData.whatsappConnectionId) {
+          messageParams.connectionId = inputData.whatsappConnectionId;
+        }
+
+        lastResult = await unifiedWhatsAppService.sendMessage(userId, messageParams);
+      } else if (platform === 'telegram') {
+        const { default: TelegramConnection } = await import('../models/telegram-connection.model.js');
+        const bot = await TelegramConnection.findOne({ user_id: userId, is_active: true });
+        if (!bot) throw new Error('No active Telegram bot found for user');
+
+        const { default: omnichannelService } = await import('../services/messaging/omnichannel.service.js');
+
+        let msgType = 'text';
+        if (resolvedMediaUrl) {
+          const extension = resolvedMediaUrl.split('.').pop().toLowerCase().split('?')[0];
+          if (['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(extension)) msgType = 'image';
+          else msgType = 'document';
+        }
+
+        const result = await omnichannelService.sendMessage({
+          platform: 'telegram',
+          workspace_id: bot.workspace_id,
+          user_id: userId,
+          recipient_id: contactDoc.telegram_chat_id,
+          message_type: msgType,
+          text: messageCaption.trim(),
+          file_url: resolvedMediaUrl,
+          buttons: [productButton]
+        });
+
+        const telegramMsgId = result?.message_id?.toString() || `tg_${Date.now()}`;
+
+        const tgInteractiveData = {
+          interactiveType: 'button',
+          buttons: [productButton]
+        };
+
+        const newMessage = await Message.create({
+          workspace_id: bot.workspace_id,
+          user_id: userId,
+          contact_id: contactDoc._id,
+          platform: 'telegram',
+          provider: 'telegram',
+          sender_id: bot.bot_id,
+          recipient_id: contactDoc.telegram_chat_id,
+          direction: 'outbound',
+          message_type: msgType,
+          content: messageCaption.trim() || 'Product Details',
+          file_url: resolvedMediaUrl,
+          interactive_data: tgInteractiveData,
+          from_me: true,
+          delivery_status: 'delivered',
+          read_status: 'unread',
+          wa_timestamp: new Date()
+        });
+
+        const ioInstance = unifiedWhatsAppService.io;
+        if (ioInstance) {
+          ioInstance.emit('whatsapp:message', {
+            id: newMessage._id.toString(),
+            content: newMessage.content,
+            interactiveData: newMessage.interactive_data || null,
+            messageType: newMessage.message_type,
+            fileUrl: newMessage.file_url || null,
+            createdAt: newMessage.wa_timestamp,
+            can_chat: true,
+            delivered_at: new Date(),
+            delivery_status: newMessage.delivery_status || 'delivered',
+            direction: newMessage.direction || 'outbound',
+            sender: { id: bot.bot_id, name: bot.bot_id },
+            recipient: { id: contactDoc.telegram_chat_id, name: contactDoc.name },
+            user_id: newMessage.user_id?.toString(),
+            contact_id: contactDoc._id.toString(),
+            platform: 'telegram',
+            provider: 'telegram'
+          });
+        }
+
+        lastResult = { provider: 'telegram', messageId: telegramMsgId };
+      } else if (platform === 'facebook' || platform === 'instagram') {
+        let connection = null;
+        if (platform === 'facebook') {
+          const { default: FacebookConnection } = await import('../models/facebook-connection.model.js');
+          connection = await FacebookConnection.findOne({ workspace_id: contactDoc.workspace_id || inputData.workspaceId, is_active: true });
+          if (!connection) connection = await FacebookConnection.findOne({ user_id: userId, is_active: true });
+        } else {
+          const { default: InstagramConnection } = await import('../models/instagram-connection.model.js');
+          connection = await InstagramConnection.findOne({ workspace_id: contactDoc.workspace_id || inputData.workspaceId, is_active: true });
+          if (!connection) connection = await InstagramConnection.findOne({ user_id: userId, is_active: true });
+        }
+
+        if (!connection) throw new Error(`No active ${platform} connection found for user`);
+
+        let pageId = null;
+        const lastMsg = await Message.findOne({ contact_id: contactDoc._id }).sort({ wa_timestamp: -1 }).lean();
+        if (lastMsg) pageId = lastMsg.direction === 'inbound' ? lastMsg.recipient_id : lastMsg.sender_id;
+
+        if (platform === 'facebook') {
+          if (!pageId) {
+            const page = connection.pages?.find(p => p.is_active !== false);
+            pageId = page?.page_id;
+          }
+          if (!pageId) throw new Error(`No active Facebook Page found`);
+        } else {
+          if (!pageId) pageId = connection.ig_user_id || (connection.pages && connection.pages[0]?.instagram_account_id);
+          if (!pageId) throw new Error(`No active Instagram Account found`);
+        }
+
+        const recipientId = platform === 'facebook' ? contactDoc.facebook_page_scoped_id : contactDoc.instagram_scoped_id;
+        if (!recipientId) throw new Error(`Recipient scoped ID not found`);
+
+        const { default: omnichannelService } = await import('../services/messaging/omnichannel.service.js');
+
+        let msgType = 'text';
+        if (resolvedMediaUrl) {
+          const extension = resolvedMediaUrl.split('.').pop().toLowerCase().split('?')[0];
+          if (['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(extension)) msgType = 'image';
+          else msgType = 'document';
+        }
+
+        const result = await omnichannelService.sendMessage({
+          platform,
+          workspace_id: connection.workspace_id,
+          user_id: userId,
+          page_id: pageId,
+          recipient_id: recipientId,
+          message_type: msgType,
+          text: messageCaption.trim(),
+          file_url: resolvedMediaUrl,
+          buttons: [productButton]
+        });
+
+        const fbIgMsgId = result?.message_id?.toString() || `fbig_${Date.now()}`;
+
+        const fbIgInteractiveData = {
+          interactiveType: 'button',
+          buttons: [productButton]
+        };
+
+        const newMessage = await Message.create({
+          workspace_id: connection.workspace_id,
+          user_id: userId,
+          contact_id: contactDoc._id,
+          platform: platform,
+          provider: platform,
+          sender_id: pageId,
+          recipient_id: recipientId,
+          direction: 'outbound',
+          message_type: msgType,
+          content: messageCaption.trim() || 'Product Details',
+          file_url: resolvedMediaUrl,
+          interactive_data: fbIgInteractiveData,
+          from_me: true,
+          delivery_status: 'delivered',
+          read_status: 'unread',
+          wa_timestamp: new Date()
+        });
+
+        const ioInstance = unifiedWhatsAppService.io;
+        if (ioInstance) {
+          ioInstance.emit('whatsapp:message', {
+            id: newMessage._id.toString(),
+            content: newMessage.content,
+            interactiveData: newMessage.interactive_data || null,
+            messageType: newMessage.message_type,
+            fileUrl: newMessage.file_url || null,
+            createdAt: newMessage.wa_timestamp,
+            can_chat: true,
+            delivered_at: new Date(),
+            delivery_status: newMessage.delivery_status || 'delivered',
+            direction: newMessage.direction || 'outbound',
+            sender: { id: pageId, name: pageId },
+            recipient: { id: recipientId, name: contactDoc.name },
+            user_id: newMessage.user_id?.toString(),
+            contact_id: contactDoc._id.toString(),
+            platform: platform,
+            provider: platform
+          });
+        }
+
+        lastResult = { provider: platform, messageId: fbIgMsgId };
+      }
+
+      return {
+        success: true,
+        output: {
+          ...inputData,
+          product_sent: true,
+          sent_to: processedRecipient,
+          provider: lastResult ? lastResult.provider : null,
+          message_id: lastResult ? lastResult.messageId : null
+        }
+      };
+
+    } catch (error) {
+      console.error('Error in executeSendProductNode:', error);
+      return { success: false, output: inputData, error: error.message };
+    }
+  }
 
   async executeCustomNode(node, inputData) {
     const { custom_logic, parameters } = node.parameters || {};
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({ node_id: node.id, type: 'custom', custom_logic });
+      return { success: true, output: inputData };
+    }
 
     console.log('Executing custom node:', custom_logic);
 
@@ -2462,6 +3432,111 @@ class AutomationEngine {
     };
   }
 
+  async executeMoveToPipelineStageNode(node, inputData) {
+    const { funnel_id, stage_id } = node.parameters || {};
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({ node_id: node.id, type: 'move_to_pipeline_stage', funnel_id, stage_id });
+      return { success: true, output: inputData };
+    }
+
+    const userId = inputData.userId || inputData.user_id;
+    const contactId = inputData.contactId || inputData.contact?._id;
+
+    if (!userId) {
+      return { success: false, output: inputData, error: 'User ID is required to move pipeline stage' };
+    }
+    if (!contactId) {
+      return { success: false, output: inputData, error: 'Contact ID is required to move pipeline stage' };
+    }
+    if (!funnel_id || !stage_id) {
+      return { success: false, output: inputData, error: 'funnel_id and stage_id are required' };
+    }
+
+    try {
+      const { KanbanFunnel, KanbanItem, Contact } = await import('../models/index.js');
+
+      const funnel = await KanbanFunnel.findOne({ _id: funnel_id, userId, deletedAt: null });
+      if (!funnel) {
+        return { success: false, output: inputData, error: 'Funnel not found' };
+      }
+
+      const targetStage = funnel.stages.find(s => s._id.toString() === stage_id.toString());
+      if (!targetStage) {
+        return { success: false, output: inputData, error: 'Stage not found in funnel' };
+      }
+
+      const contactDoc = await Contact.findOne({ _id: contactId, created_by: userId, deleted_at: null }).lean();
+      if (!contactDoc) {
+        return { success: false, output: inputData, error: 'Contact not found' };
+      }
+
+      let item = await KanbanItem.findOne({ globalItemId: contactId, funnelId: funnel_id });
+      let isNewItem = false;
+      let fromStageId = null;
+
+      if (item) {
+        fromStageId = item.stageId;
+        item.stageId = stage_id;
+        item.movedAt = new Date();
+      } else {
+        isNewItem = true;
+
+        const mapData = (itemData) => {
+          let title = itemData.name || `${itemData.first_name || ''} ${itemData.last_name || ''}`.trim() || 'No Name';
+          let subtitle = itemData.email || itemData.phone_number || 'No Contact Info';
+          let label = 'Contact';
+          let extra = {
+            phone: itemData.phone_number || itemData.phone,
+            company: itemData.company,
+            source: itemData.source,
+            chat_status: itemData.chat_status
+          };
+
+          const cleanedExtra = Object.fromEntries(
+            Object.entries(extra).filter(([_, v]) => v !== null && v !== undefined)
+          );
+
+          return { title, subtitle, label, extra: cleanedExtra };
+        };
+
+        const mappedData = mapData(contactDoc);
+
+        item = new KanbanItem({
+          funnelId: funnel_id,
+          globalItemId: contactId,
+          stageId: stage_id,
+          data: mappedData,
+          history: []
+        });
+      }
+
+      item.history.push({
+        action: isNewItem ? 'created' : 'moved',
+        fromStageId,
+        toStageId: stage_id,
+        timestamp: new Date(),
+        details: 'Moved by automation'
+      });
+
+      await item.save();
+
+      return {
+        success: true,
+        output: {
+          ...inputData,
+          pipeline_stage_moved: true,
+          funnel_name: funnel.name,
+          stage_name: targetStage.name
+        }
+      };
+    } catch (err) {
+      console.error('[Move to Pipeline Stage] Error:', err);
+      return { success: false, output: inputData, error: err.message };
+    }
+  }
+
 
   async updateFlowStatistics(flowId, success) {
     try {
@@ -2493,20 +3568,87 @@ class AutomationEngine {
     const nextNodes = this.getConnectedNodes(flow, node.id);
     const nextNodeId = nextNodes.length > 0 ? nextNodes[0].id : null;
 
-    const executionId = this.findExecutionIdByLog(executionLog);
+    const executionId = inputData.executionId;
     if (!executionId) {
       return { success: false, error: 'Could not find active execution' };
     }
+
+    // Clear resume flag before persisting so the next resume starts without it
+    const inputDataToSave = { ...inputData };
+    delete inputDataToSave.is_resuming;
 
     await AutomationExecution.findByIdAndUpdate(executionId, {
       status: 'waiting',
       next_node_id: nextNodeId,
       waiting_for_node_id: node.id,
       contact_identifier: inputData.senderNumber,
-      input_data: inputData
+      input_data: inputDataToSave
     });
 
     console.log(`Execution ${executionId} is now waiting for reply from ${inputData.senderNumber}. Next node: ${nextNodeId}`);
+
+    return { success: true, status: 'waiting', output: inputData };
+  }
+
+  async executeAskAndWaitNode(node, flow, inputData, executionLog) {
+    const { timeout_minutes = 10, recipient } = node.parameters || {};
+
+    const simulatedNode = { ...node, parameters: { ...(node.parameters || {}) } };
+    if (!simulatedNode.parameters.recipient) {
+      simulatedNode.parameters.recipient = inputData.senderNumber || inputData.phone_number || '{{senderNumber}}';
+    }
+    // Map question_message / message → message_body so executeSendMessageNode finds the text
+    if (!simulatedNode.parameters.message_body) {
+      simulatedNode.parameters.message_body =
+        simulatedNode.parameters.question_message ||
+        simulatedNode.parameters.message ||
+        simulatedNode.parameters.bodyText ||
+        simulatedNode.parameters.text ||
+        '';
+    }
+
+    const sendResult = await this.executeSendMessageNode(simulatedNode, inputData);
+    if (!sendResult.success && !inputData.is_test) {
+      // Log the error but still proceed to set up the wait so flow doesn't terminate
+      console.error(`[Ask and Wait] Failed to send question message: ${sendResult.error}. Proceeding to wait state anyway.`);
+    }
+
+    const executionId = inputData.executionId;
+    if (!executionId) {
+      return { success: false, error: 'Could not find active execution' };
+    }
+
+    // Determine next node so free-text captures can resume correctly
+    const nextNodes = this.getConnectedNodes(flow, node.id);
+    const expectedAnswers = node.parameters?.expected_answers || [];
+    const hasExpectedAnswers = Array.isArray(expectedAnswers) && expectedAnswers.length > 0;
+    const nextNodeId = (!hasExpectedAnswers && nextNodes.length > 0) ? nextNodes[0].id : null;
+
+    let timeoutAt = null;
+    if (timeout_minutes > 0) {
+      timeoutAt = new Date();
+      timeoutAt.setMinutes(timeoutAt.getMinutes() + Number(timeout_minutes));
+    }
+
+    const contactIdentifier = simulatedNode.parameters.recipient.includes('{{')
+      ? this.processTemplateString(simulatedNode.parameters.recipient, inputData)
+      : simulatedNode.parameters.recipient;
+
+    // Clear resume flag before persisting so the next resume starts without it
+    const inputDataToSave = { ...inputData };
+    delete inputDataToSave.is_resuming;
+
+    await AutomationExecution.findByIdAndUpdate(executionId, {
+      status: 'waiting',
+      waiting_for_node_id: node.id,
+      next_node_id: nextNodeId,
+      contact_identifier: contactIdentifier,
+      input_data: inputDataToSave,
+      timeout_at: timeoutAt,
+      retry_count: 0
+    });
+
+    console.log(`Execution ${executionId} is waiting for adaptive input (ask_and_wait). Next node: ${nextNodeId}. Timeout at: ${timeoutAt}`);
 
     return { success: true, status: 'waiting', output: inputData };
   }
@@ -2524,30 +3666,380 @@ class AutomationEngine {
     console.log(`Resuming automation execution ${execution._id}`);
 
     const waitingNode = flow.nodes.find(n => n.id === execution.waiting_for_node_id);
+
+    if (waitingNode && eventData.interactive_id) {
+      const matchedRoute = eventData.interactive_id;
+      if (matchedRoute.includes('___')) {
+        const parts = matchedRoute.split('___');
+        if (parts.length >= 3) {
+          const buttonNodeId = parts[1];
+          if (buttonNodeId !== waitingNode.id) {
+            console.log(`[Resume Execution] Button/List clicked belongs to node "${buttonNodeId}", but waiting for node "${waitingNode.id}". Skipping resume.`);
+            return { success: false, notMatched: true };
+          }
+        }
+      }
+    }
+
     const variableName = waitingNode?.parameters?.variable_name || 'last_user_message';
 
-    const messageText = typeof eventData.message === 'string' ? eventData.message : eventData.message?.text?.body || '';
-    const currentData = {
+    // --- Resolve human-readable button/list label ---
+    // Priority: textContent (button label from platform) > fallback button param lookup > raw interactive_id > plain message
+    const rawInteractiveId = eventData.interactive_id || null;
+    let resolvedLabel = eventData.textContent || null;
+
+    // If no textContent but we have an interactive_id, try to resolve the label from the waiting node's button/list params
+    if (!resolvedLabel && rawInteractiveId && waitingNode) {
+      const cleanSystemPrefixes = (val) => {
+        if (typeof val !== 'string') return val;
+        let cur = val, prev;
+        do { prev = cur; cur = cur.replace(/^(f[0-9a-f]{6}|new[a-z0-9]+)___/i, ''); } while (cur !== prev);
+        return cur;
+      };
+      const cleanIncoming = cleanSystemPrefixes(rawInteractiveId).toLowerCase();
+
+      const buttonParams = waitingNode.parameters?.button_params || waitingNode.parameters?.buttons || [];
+      for (let i = 0; i < buttonParams.length; i++) {
+        const btn = buttonParams[i];
+        const rawId = btn.id || btn.value || `btn_${i + 1}`;
+        const cleanId = cleanSystemPrefixes(rawId.toString()).toLowerCase();
+        if (cleanId === cleanIncoming || rawId.toString().toLowerCase() === rawInteractiveId.toLowerCase()) {
+          resolvedLabel = btn.title || btn.text || null;
+          break;
+        }
+      }
+
+      // Check list items as well
+      if (!resolvedLabel) {
+        const items = waitingNode.parameters?.list_params?.items || [];
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i];
+          const rawId = item.id || item.title || `item_${i + 1}`;
+          const cleanId = cleanSystemPrefixes(rawId.toString()).toLowerCase();
+          if (cleanId === cleanIncoming || rawId.toString().toLowerCase() === rawInteractiveId.toLowerCase()) {
+            resolvedLabel = item.title || null;
+            break;
+          }
+        }
+      }
+    }
+
+    // messageText used for condition evaluation = human-readable label when available
+    const rawMessage = rawInteractiveId || eventData.message;
+    const rawText = typeof rawMessage === 'string' ? rawMessage : rawMessage?.text?.body || '';
+    // Use the human-readable label for condition checks; fall back to raw text only if nothing else resolved
+    let messageText = resolvedLabel || rawText;
+
+    console.log(`[Resume] waitingNode="${waitingNode?.type}" rawInteractiveId="${rawInteractiveId}" resolvedLabel="${resolvedLabel}" messageText="${messageText}"`);
+
+    let currentData = {
       ...execution.input_data,
+      executionId: execution._id,
+      test_responses: [],
       [variableName]: messageText,
       last_message: messageText,
+      // 'message' must be the human-readable label so Logic Control conditions like
+      // "message equals Tomorrow" work correctly regardless of the technical button ID
+      message: messageText,
       messagePayload,
-      flow_id: flow._id
+      flow_id: flow._id,
+      textContent: resolvedLabel || eventData.textContent || null,
+      interactive_id: rawInteractiveId,
+      // Signal that we are mid-resume so processConnectedNodes skips auto-wait
+      // (prevents Send Message branches from pausing again when flowing to ask_and_wait)
+      is_resuming: true
     };
+
+    if (eventData.form_data) {
+      currentData = { ...currentData, ...eventData.form_data };
+    }
+
+    let nextNodeId = execution.next_node_id;
+
+    // Auto-wait case: waitingNode is send_message, next is a condition node.
+    // Inject the user's reply into every field referenced by the condition rules
+    // so the condition can evaluate correctly (e.g. field "Plan" gets value "Premium").
+    if (waitingNode && waitingNode.type === 'send_message' && nextNodeId) {
+      const conditionNode = flow.nodes.find(n => n.id === nextNodeId);
+      if (conditionNode && (conditionNode.type === 'advanced_condition' || conditionNode.type === 'condition')) {
+        const rules = conditionNode.parameters?.rules || [];
+        const conditions = conditionNode.parameters?.conditions || [];
+        const allFields = [
+          ...rules.map(r => r.field),
+          ...conditions.map(c => c.field),
+          conditionNode.parameters?.condition?.field
+        ].filter(f => f && typeof f === 'string' && f !== 'message');
+
+        allFields.forEach(fieldName => {
+          currentData[fieldName] = messageText;
+          currentData[fieldName.toLowerCase()] = messageText;
+        });
+
+        currentData.__auto_wait_reply = messageText;
+
+        console.log(`[Auto-wait Resume] Injected user reply "${messageText}" into condition fields: [${allFields.join(', ')}]`);
+      }
+    }
+
+    if (waitingNode && waitingNode.type === 'ask_and_wait') {
+      const { expected_answers, validation, fallback_route, retry_limit = 2, retry_message } = waitingNode.parameters || {};
+      let matchedRoute = null;
+      // Track whether the node has any expected_answers configured (button/list mode)
+      const hasExpectedAnswers = Array.isArray(expected_answers) && expected_answers.length > 0;
+
+      const cleanSystemPrefixes = (val) => {
+        if (typeof val !== 'string') return val;
+        let current = val;
+        let previous;
+        do {
+          previous = current;
+          current = current.replace(/^(f[0-9a-f]{6}|new[a-z0-9]+)___/i, '');
+        } while (current !== previous);
+        return current;
+      };
+
+      if (hasExpectedAnswers) {
+        const match = expected_answers.find(a => {
+          if (!a.value) return false;
+          const targetVal = a.value.trim().toLowerCase();
+          const rawIncomingVal = messageText.trim().toLowerCase();
+          const incomingVal = cleanSystemPrefixes(rawIncomingVal);
+
+          if (incomingVal === targetVal) return true;
+          if (rawIncomingVal.includes('___')) {
+            const parts = rawIncomingVal.split('___');
+            if (parts[parts.length - 1] === targetVal) return true;
+            if (parts[parts.length - 1] === `btn_${expected_answers.indexOf(a) + 1}`) return true;
+          }
+          const btnTitle = eventData.textContent || eventData.message;
+          if (btnTitle && typeof btnTitle === 'string' && btnTitle.trim().toLowerCase() === targetVal) return true;
+          return false;
+        });
+        if (match) {
+          matchedRoute = match.route;
+        }
+      }
+
+      let isValid = true;
+      if (!matchedRoute && validation && validation.type) {
+        if (validation.type === 'email') {
+          isValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(messageText.trim());
+        } else if (validation.type === 'number') {
+          isValid = !isNaN(Number(messageText.trim()));
+        } else if (validation.type === 'regex' && validation.regex) {
+          try { isValid = new RegExp(validation.regex).test(messageText.trim()); } catch (e) { }
+        }
+      }
+
+      if (!matchedRoute && !isValid) {
+        const retryCount = (execution.retry_count || 0) + 1;
+        if (retryCount <= retry_limit) {
+          console.log(`[Smart Capture] Validation failed. Retry ${retryCount}/${retry_limit}`);
+
+          if (retry_message && currentData.senderNumber) {
+            const processedRetryMsg = this.processTemplateString(retry_message, currentData);
+
+            if (currentData.is_test) {
+              currentData.test_responses = currentData.test_responses || [];
+              currentData.test_responses.push({
+                node_id: waitingNode.id,
+                type: 'send_message',
+                message: processedRetryMsg,
+                messageParams: {
+                  messageType: 'text',
+                  text: { body: processedRetryMsg }
+                }
+              });
+            } else {
+              // Send retry via the correct platform (use same path as executeSendMessageNode)
+              const retryNode = {
+                id: waitingNode.id,
+                type: 'send_message',
+                parameters: {
+                  recipient: currentData.senderNumber,
+                  message_body: processedRetryMsg,
+                  messageType: 'text'
+                }
+              };
+              await this.executeSendMessageNode(retryNode, currentData)
+                .catch(e => console.error('Failed to send retry msg:', e));
+            }
+          }
+
+          await AutomationExecution.findByIdAndUpdate(execution._id, { retry_count: retryCount, input_data: currentData });
+          return { success: true, status: 'waiting', output: currentData, executionLog: execution.execution_log || [] };
+        } else {
+          matchedRoute = fallback_route || 'fallback';
+        }
+      }
+
+      if (!matchedRoute && hasExpectedAnswers) {
+        matchedRoute = fallback_route || 'fallback';
+      }
+
+      if (matchedRoute) {
+        // Try explicit route connection first (for expected_answers button matches)
+        let connection = flow.connections.find(c => c.source === waitingNode.id && c.sourceHandle === matchedRoute);
+        if (!connection) {
+          connection = flow.connections.find(c => {
+            if (c.source !== waitingNode.id) return false;
+            const isFallbackHandle = c.sourceHandle === 'fallback' || c.sourceHandle === 'fallback_route';
+            const isExpectedAnswersHandle = c.sourceHandle === 'expected_answers' || c.sourceHandle === matchedRoute;
+
+            if (matchedRoute === 'fallback' || matchedRoute === fallback_route) {
+              return isFallbackHandle;
+            } else {
+              return isExpectedAnswersHandle;
+            }
+          });
+        }
+        if (connection) {
+          nextNodeId = connection.target;
+        } else {
+          // Route not found — fall back to next_node_id set during ask_and_wait execution
+          nextNodeId = execution.next_node_id || null;
+        }
+      }
+      // If no matchedRoute (free-text capture with no expected_answers), use the default next node
+      // already stored in execution.next_node_id when the ask_and_wait node paused execution.
+      // nextNodeId was initialised to execution.next_node_id at line 3626, so no change needed here.
+      console.log(`[ask_and_wait Resume] matchedRoute="${matchedRoute}" nextNodeId="${nextNodeId}" variableName="${variableName}" reply="${messageText}"`);
+    } else if (waitingNode) {
+      const matchedRoute = eventData.interactive_id || '';
+      const incomingText = (matchedRoute || messageText || eventData.message || eventData.textContent || '').toString().trim().toLowerCase();
+      const cleanRoute = matchedRoute ? matchedRoute.split('___').pop().toLowerCase() : incomingText;
+
+      if (cleanRoute) {
+        console.log(`[Resume Execution] Resolving reply: "${incomingText}" (clean key: "${cleanRoute}") for node type "${waitingNode.type}"`);
+
+        let connection = null;
+
+        // 1. Index-based matching for buttons
+        if (waitingNode.type === 'send_message' || waitingNode.type === 'button_message') {
+          const buttonParams = waitingNode.parameters?.button_params || waitingNode.parameters?.buttons || [];
+          let matchedIndex = -1;
+          for (let i = 0; i < buttonParams.length; i++) {
+            const btn = buttonParams[i];
+            const rawId = btn.id || btn.value || `btn_${i + 1}`;
+            const title = btn.title || btn.text || '';
+            const cleanRawId = rawId.toString().split('___').pop().toLowerCase();
+
+            if (rawId.toString().toLowerCase() === cleanRoute ||
+              cleanRawId === cleanRoute ||
+              title.toString().toLowerCase() === cleanRoute ||
+              title.toString().toLowerCase() === incomingText) {
+              matchedIndex = i;
+              break;
+            }
+          }
+          if (matchedIndex !== -1) {
+            const targetHandle = `src-btn-${matchedIndex}`;
+            connection = flow.connections.find(c => c.source === waitingNode.id && c.sourceHandle === targetHandle);
+            if (connection) {
+              console.log(`[Resume Execution] Matched button index ${matchedIndex} to handle "${targetHandle}" -> target node "${connection.target}"`);
+            } else {
+              const virtualSourcePrefix = `cond-btn-___${waitingNode.id}___${matchedIndex}___`;
+              connection = flow.connections.find(c => c.source && c.source.startsWith(virtualSourcePrefix));
+              if (connection) {
+                console.log(`[Resume Execution] Matched virtual button condition to target node "${connection.target}"`);
+              }
+            }
+          }
+        }
+
+        // 2. Index-based matching for list items
+        if (!connection && (waitingNode.type === 'send_message' || waitingNode.type === 'list_message')) {
+          const sections = waitingNode.parameters?.list_params?.sections || [];
+          let matchedSectionIdx = -1;
+          let matchedItemIdx = -1;
+
+          if (sections.length > 0) {
+            for (let sIdx = 0; sIdx < sections.length; sIdx++) {
+              const section = sections[sIdx];
+              const rows = section.rows || section.items || [];
+              for (let iIdx = 0; iIdx < rows.length; iIdx++) {
+                const item = rows[iIdx];
+                const rawId = item.id || item.rowId || `row_${iIdx}`;
+                const title = item.title || '';
+                const cleanRawId = rawId.toString().split('___').pop().toLowerCase();
+
+                if (rawId.toString().toLowerCase() === cleanRoute ||
+                  cleanRawId === cleanRoute ||
+                  title.toString().toLowerCase() === cleanRoute ||
+                  title.toString().toLowerCase() === incomingText) {
+                  matchedSectionIdx = sIdx;
+                  matchedItemIdx = iIdx;
+                  break;
+                }
+              }
+              if (matchedSectionIdx !== -1) break;
+            }
+          } else {
+            const items = waitingNode.parameters?.list_params?.items || [];
+            for (let iIdx = 0; iIdx < items.length; iIdx++) {
+              const item = items[iIdx];
+              const rawId = item.id || item.title || `item_${iIdx + 1}`;
+              const title = item.title || '';
+              const cleanRawId = rawId.toString().split('___').pop().toLowerCase();
+
+              if (rawId.toString().toLowerCase() === cleanRoute ||
+                cleanRawId === cleanRoute ||
+                title.toString().toLowerCase() === cleanRoute ||
+                title.toString().toLowerCase() === incomingText) {
+                matchedSectionIdx = 0;
+                matchedItemIdx = iIdx;
+                break;
+              }
+            }
+          }
+
+          if (matchedSectionIdx !== -1 && matchedItemIdx !== -1) {
+            const targetHandle = `src-item-${matchedSectionIdx}-${matchedItemIdx}`;
+            connection = flow.connections.find(c => c.source === waitingNode.id && c.sourceHandle === targetHandle);
+            if (connection) {
+              console.log(`[Resume Execution] Matched list item section ${matchedSectionIdx}, item ${matchedItemIdx} to handle "${targetHandle}" -> target node "${connection.target}"`);
+            } else {
+              const virtualSourcePrefix = `cond-list-___${waitingNode.id}___${matchedSectionIdx}___${matchedItemIdx}___`;
+              connection = flow.connections.find(c => c.source && c.source.startsWith(virtualSourcePrefix));
+              if (connection) {
+                console.log(`[Resume Execution] Matched virtual list item condition to target node "${connection.target}"`);
+              }
+            }
+          }
+        }
+
+        // 3. Fallback to direct handle match
+        if (!connection && matchedRoute) {
+          connection = flow.connections.find(c => {
+            if (c.source !== waitingNode.id) return false;
+            if (!c.sourceHandle) return false;
+
+            if (c.sourceHandle === matchedRoute) return true;
+            if (c.sourceHandle.replace('src-', '').replace('-', '_') === matchedRoute) return true;
+            if (c.sourceHandle.includes(matchedRoute) || matchedRoute.includes(c.sourceHandle)) return true;
+
+            return false;
+          });
+        }
+
+        if (connection) {
+          nextNodeId = connection.target;
+        }
+      }
+    }
 
     await AutomationExecution.findByIdAndUpdate(execution._id, {
       status: 'running',
       contact_identifier: null
     });
 
-    const nextNodeId = execution.next_node_id;
     if (!nextNodeId) {
       console.log('No next node to execute after resume');
       await AutomationExecution.findByIdAndUpdate(execution._id, {
         status: 'success',
         completed_at: new Date()
       });
-      return { success: true };
+      return { success: true, output: currentData, executionLog: [] };
     }
 
     const nextNode = flow.nodes.find(n => n.id === nextNodeId);
@@ -2564,7 +4056,7 @@ class AutomationEngine {
 
     if (nodeResult.status === 'waiting') {
       this.runningExecutions.delete(executionId);
-      return { success: true };
+      return { success: true, status: 'waiting', output: currentData, executionLog };
     }
 
     if (nodeResult.success) {
@@ -2577,7 +4069,12 @@ class AutomationEngine {
       const connResult = await this.processConnectedNodes(flow, nextNode, updatedData, executionLog, currentData);
       if (connResult && connResult.status === 'waiting') {
         this.runningExecutions.delete(executionId);
-        return { success: true };
+        return { success: true, status: 'waiting', output: connResult.output || updatedData, executionLog };
+      }
+      if (connResult && connResult.success) {
+        currentData = connResult.output;
+      } else {
+        currentData = updatedData;
       }
     }
 
@@ -2595,7 +4092,7 @@ class AutomationEngine {
     await this.updateFlowStatistics(flow._id, nodeResult.success);
     this.runningExecutions.delete(executionId);
 
-    return { success: true };
+    return { success: true, output: currentData, executionLog };
   }
 
 
@@ -2628,6 +4125,12 @@ class AutomationEngine {
 
   async executeAddTagNode(node, inputData) {
     const { tag_id, tag_name } = node.parameters || {};
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({ node_id: node.id, type: 'add_tag', tag_id, tag_name });
+      return { success: true, output: inputData };
+    }
     const contactId = inputData.contactId;
 
     if (!contactId) {
@@ -2675,6 +4178,12 @@ class AutomationEngine {
 
   async executeRemoveTagNode(node, inputData) {
     const { tag_ids } = node.parameters || {};
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({ node_id: node.id, type: 'remove_tag', tag_ids });
+      return { success: true, output: inputData };
+    }
     const contactId = inputData.contactId;
 
     if (!contactId) {
@@ -2714,6 +4223,12 @@ class AutomationEngine {
 
   async executeAssignAgentNode(node, inputData) {
     const { agent_id } = node.parameters || {};
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({ node_id: node.id, type: 'assign_agent', agent_id });
+      return { success: true, output: inputData };
+    }
     const senderNumber = inputData.senderNumber;
     const recipientNumber = inputData.recipientNumber;
     const whatsappPhoneNumberId = inputData.whatsappPhoneNumberId;
@@ -2749,6 +4264,12 @@ class AutomationEngine {
 
   async executeAssignRandomAgentNode(node, inputData) {
     const { team_id } = node.parameters || {};
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({ node_id: node.id, type: 'assign_random_agent', team_id });
+      return { success: true, output: inputData };
+    }
     const senderNumber = inputData.senderNumber;
     const recipientNumber = inputData.recipientNumber;
     const whatsappPhoneNumberId = inputData.whatsappPhoneNumberId;
@@ -2775,9 +4296,9 @@ class AutomationEngine {
           potentialAgents = await User.find({ created_by: userId, status: true, deleted_at: null })
             .sort({ created_at: 1 })
             .lean();
-            
+
           if (ownerDoc.status === true && !ownerDoc.deleted_at) {
-            potentialAgents.unshift(ownerDoc); 
+            potentialAgents.unshift(ownerDoc);
           }
         }
       }
@@ -2828,6 +4349,27 @@ class AutomationEngine {
 
   async executeSendCtaNode(node, inputData) {
     const { recipient, text, button_text, url } = node.parameters || {};
+
+    const processedText = text ? this.processTemplateString(text, inputData) : '';
+    const processedUrl = url ? this.processTemplateString(url, inputData) : '';
+    const processedButtonText = button_text ? this.processTemplateString(button_text, inputData) : '';
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({
+        node_id: node.id,
+        type: 'cta_button',
+        text: processedText,
+        button_text: processedButtonText,
+        url: processedUrl,
+        messageParams: {
+          messageText: processedText,
+          messageType: 'interactive',
+          buttonParams: [{ title: processedButtonText, id: processedUrl }]
+        }
+      });
+      return { success: true, output: inputData };
+    }
     const userId = inputData.userId || inputData.user_id;
     const whatsappPhoneNumberId = inputData.whatsappPhoneNumberId;
 
@@ -2836,8 +4378,6 @@ class AutomationEngine {
     }
 
     const processedRecipient = this.processTemplateString(recipient, inputData);
-    const processedText = this.processTemplateString(text, inputData);
-    const processedUrl = this.processTemplateString(url, inputData);
 
     try {
       let contactDoc = null;
@@ -2868,6 +4408,7 @@ class AutomationEngine {
         const result = await omnichannelService.sendMessage({
           platform: 'telegram',
           workspace_id: bot.workspace_id,
+          user_id: userId,
           recipient_id: contactDoc.telegram_chat_id,
           message_type: 'text',
           text: processedText,
@@ -2904,6 +4445,7 @@ class AutomationEngine {
           const formattedMessage = {
             id: newMessage._id.toString(),
             content: newMessage.content,
+            interactiveData: newMessage.interactive_data || null,
             messageType: newMessage.message_type,
             fileUrl: newMessage.file_url || null,
             createdAt: newMessage.wa_timestamp,
@@ -2977,6 +4519,7 @@ class AutomationEngine {
         const result = await omnichannelService.sendMessage({
           platform,
           workspace_id: connection.workspace_id,
+          user_id: userId,
           page_id: pageId,
           recipient_id: recipientId,
           message_type: 'text',
@@ -3007,6 +4550,7 @@ class AutomationEngine {
           const formattedMessage = {
             id: newMessage._id.toString(),
             content: newMessage.content,
+            interactiveData: newMessage.interactive_data || null,
             messageType: newMessage.message_type,
             fileUrl: newMessage.file_url || null,
             createdAt: newMessage.wa_timestamp,
@@ -3053,10 +4597,22 @@ class AutomationEngine {
   }
 
   async executeAssignChatbotNode(node, inputData) {
-    const { chatbot_id, duration_hours } = node.parameters || {};
+    const {
+      chatbot_id,
+      duration_hours,
+      tone,
+      message_limit,
+      enable_human_handoff,
+      handoff_keywords,
+      handoff_message
+    } = node.parameters || {};
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({ node_id: node.id, type: 'assign_chatbot', chatbot_id });
+      return { success: true, output: inputData };
+    }
     const senderNumber = inputData.senderNumber;
-    const recipientNumber = inputData.recipientNumber;
-    const whatsappPhoneNumberId = inputData.whatsappPhoneNumberId;
     const userId = inputData.userId || inputData.user_id;
 
     if (!chatbot_id) {
@@ -3064,29 +4620,37 @@ class AutomationEngine {
     }
 
     try {
-      let expiresAt = null;
-      if (duration_hours && duration_hours > 0) {
-        expiresAt = new Date();
-        expiresAt.setHours(expiresAt.getHours() + Number(duration_hours));
+      const { default: Contact } = await import('../models/contact.model.js');
+      const contact = await Contact.findOne({
+        $or: [{ phone_number: senderNumber }, { facebook_page_scoped_id: senderNumber }, { instagram_scoped_id: senderNumber }, { telegram_chat_id: senderNumber }],
+        created_by: userId,
+        deleted_at: null
+      });
+
+      if (!contact) {
+        return { success: false, output: inputData, error: 'Contact not found' };
       }
 
-      await ChatAssignment.findOneAndUpdate(
-        {
-          sender_number: senderNumber,
-          receiver_number: recipientNumber,
-          whatsapp_phone_number_id: whatsappPhoneNumberId
-        },
-        {
-          chatbot_id,
-          chatbot_expires_at: expiresAt,
-          assigned_by: userId,
-          status: 'assigned',
-          is_solved: false
-        },
-        { upsert: true, returnDocument: 'after' }
-      );
+      contact.assigned_chatbot = chatbot_id;
+      contact.chatbot_paused = false;
+      contact.ai_message_count = 0;
 
-      console.log(`[assign_chatbot] Assigned chatbot ${chatbot_id} to ${senderNumber} (expires: ${expiresAt || 'never'})`);
+      const overrides = {};
+      if (tone) overrides.tone = tone;
+      if (message_limit !== undefined) overrides.message_limit = Number(message_limit);
+      if (enable_human_handoff !== undefined) overrides.enable_human_handoff = enable_human_handoff;
+      if (handoff_keywords) overrides.handoff_keywords = Array.isArray(handoff_keywords) ? handoff_keywords : handoff_keywords.split(',').map(k => k.trim());
+      if (handoff_message) overrides.handoff_message = handoff_message;
+
+      if (Object.keys(overrides).length > 0) {
+        contact.chatbot_overrides = overrides;
+      } else {
+        contact.chatbot_overrides = null;
+      }
+
+      await contact.save();
+
+      console.log(`[assign_chatbot] Assigned chatbot ${chatbot_id} to ${senderNumber} with overrides:`, overrides);
       return { success: true, output: { ...inputData, chatbot_assigned_id: chatbot_id } };
     } catch (error) {
       console.error(`[assign_chatbot] Error:`, error);
@@ -3097,6 +4661,12 @@ class AutomationEngine {
 
   async executeSaveToGoogleSheetNode(node, inputData) {
     const { google_account_id, spreadsheet_id, sheet_name = 'Sheet1', column_mappings } = node.parameters || {};
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({ node_id: node.id, type: 'save_to_google_sheet', spreadsheet_id });
+      return { success: true, output: inputData };
+    }
 
     if (!google_account_id || !spreadsheet_id) {
       return { success: false, output: inputData, error: 'google_account_id and spreadsheet_id are required' };
@@ -3144,8 +4714,62 @@ class AutomationEngine {
   }
 
 
+
+  async executeSendGoogleFormNode(node, inputData) {
+    const { google_account_id, form_id, message_body, recipient, provider_type } = node.parameters || {};
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({ node_id: node.id, type: 'send_google_form', form_id });
+      return { success: true, output: inputData };
+    }
+
+    if (!google_account_id || !form_id) {
+      return { success: false, output: inputData, error: 'google_account_id and form_id are required' };
+    }
+
+    try {
+      const forms = await getFormsClient(google_account_id);
+      const formObj = await forms.forms.get({ formId: form_id });
+      const responderUri = formObj.data.responderUri;
+
+      let processedRecipient = recipient ? this.processTemplateString(recipient, inputData) : null;
+      if (!processedRecipient) {
+        processedRecipient = inputData.senderNumber || inputData.phone_number || inputData.recipientNumber;
+      }
+
+      if (!processedRecipient) {
+        return { success: false, output: inputData, error: 'Recipient could not be determined' };
+      }
+
+      const processedMessage = this.processTemplateString(message_body || '', inputData);
+      const finalMessage = processedMessage ? `${processedMessage}\n\n${responderUri}` : responderUri;
+
+      const simulatedNode = {
+        id: node.id,
+        parameters: {
+          recipient: processedRecipient,
+          message_body: finalMessage,
+          provider_type
+        }
+      };
+
+      return await this.executeSendMessageNode(simulatedNode, inputData);
+    } catch (error) {
+      console.error('Error in executeSendGoogleFormNode:', error);
+      await handleGoogleApiError(error, google_account_id);
+      return { success: false, output: inputData, error: error.message };
+    }
+  }
+
   async executeCreateCalendarEventNode(node, inputData) {
     const { google_account_id, calendar_id = 'primary', summary, description, start_time, end_time } = node.parameters || {};
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({ node_id: node.id, type: 'create_calendar_event', summary });
+      return { success: true, output: inputData };
+    }
 
     console.log(`[google_calendar] Starting event creation for calendar: ${calendar_id}`);
 
@@ -3190,8 +4814,78 @@ class AutomationEngine {
     }
   }
 
+  async executeCreateGoogleMeetNode(node, inputData) {
+    const { google_account_id, calendar_id = 'primary', summary, description, start_time, end_time, variable_name = 'meet_link' } = node.parameters || {};
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({ node_id: node.id, type: 'create_google_meet', summary });
+      return { success: true, output: inputData };
+    }
+
+    console.log(`[google_meet] Starting event creation for calendar: ${calendar_id}`);
+
+    if (!google_account_id) {
+      return { success: false, output: inputData, error: 'google_account_id is required' };
+    }
+
+    try {
+      const calendar = await getCalendarClient(google_account_id);
+
+      const resolvedSummary = this.processTemplateString(summary || 'Google Meet Scheduled Event', inputData);
+      const resolvedDescription = this.processTemplateString(description || '', inputData);
+      const resolvedStart = this.processTemplateString(start_time || new Date().toISOString(), inputData);
+
+      let resolvedEnd = this.processTemplateString(end_time || '', inputData);
+      if (!resolvedEnd) {
+        const start = new Date(resolvedStart);
+        start.setMinutes(start.getMinutes() + 30);
+        resolvedEnd = start.toISOString();
+      }
+
+      const response = await calendar.events.insert({
+        calendarId: calendar_id,
+        conferenceDataVersion: 1,
+        requestBody: {
+          summary: resolvedSummary,
+          description: resolvedDescription,
+          start: { dateTime: resolvedStart },
+          end: { dateTime: resolvedEnd },
+          conferenceData: {
+            createRequest: {
+              requestId: `meet_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+              conferenceSolutionKey: {
+                type: 'hangoutsMeet'
+              }
+            }
+          }
+        }
+      });
+
+      console.log(`[google_meet] Event created successfully: ${response.data.id}`);
+      const meetLink = response.data.hangoutLink || '';
+
+      const output = { ...inputData, event: response.data };
+      if (variable_name) {
+        output[variable_name] = meetLink;
+      }
+
+      return { success: true, output };
+    } catch (error) {
+      console.error('[google_meet] Error creating calendar event:', error.message);
+      await handleGoogleApiError(error, google_account_id);
+      return { success: false, output: inputData, error: error.message };
+    }
+  }
+
   async executeAppointmentFlowNode(node, flow, inputData, executionLog) {
     const { appointment_config_id } = node.parameters || {};
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({ node_id: node.id, type: 'appointment_flow', appointment_config_id });
+      return { status: 'waiting', success: true, output: inputData };
+    }
 
     if (!appointment_config_id) {
       return { success: false, output: inputData, error: 'appointment_config_id is required' };
@@ -3209,6 +4903,43 @@ class AutomationEngine {
       return { status: 'waiting', success: true, output: inputData };
     } catch (error) {
       console.error('Error executing appointment flow node:', error);
+      return { success: false, output: inputData, error: error.message };
+    }
+  }
+
+  async executeSendSequenceNode(node, inputData) {
+    const { sequence_id } = node.parameters || {};
+
+    if (inputData.is_test) {
+      inputData.test_responses = inputData.test_responses || [];
+      inputData.test_responses.push({ node_id: node.id, type: 'send_sequence', sequence_id });
+      return { success: true, output: inputData };
+    }
+
+    if (!sequence_id) {
+      return { success: false, output: inputData, error: 'sequence_id is required' };
+    }
+
+    const contactId = inputData.contactId || inputData.contact?._id;
+    const userId = inputData.userId || inputData.user_id;
+
+    if (!contactId) {
+      return { success: false, output: inputData, error: 'contactId is required to enroll in sequence' };
+    }
+
+    try {
+      await handleSequenceReply({
+        wabaId: inputData.contact?.waba_id || inputData.waba_id || null,
+        contactId,
+        sequenceId: sequence_id,
+        userId,
+        whatsappPhoneNumberId: inputData.whatsappPhoneNumberId
+      });
+
+      console.log(`[send_sequence] Enrolled contact ${contactId} in sequence ${sequence_id}`);
+      return { success: true, output: { ...inputData, sequence_enrolled_id: sequence_id } };
+    } catch (error) {
+      console.error(`[send_sequence] Error:`, error);
       return { success: false, output: inputData, error: error.message };
     }
   }

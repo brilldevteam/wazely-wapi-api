@@ -111,7 +111,7 @@ export const findMatchingBot = async (accountId, text, platform = 'whatsapp', co
             const template = await Template.findById(bot.reply_id).lean();
             if (template) {
                 const templatePlatform = template.platform || 'whatsapp';
-                const isPlatformMatch = templatePlatform === platform || (['whatsapp', 'baileys'].includes(templatePlatform) && ['whatsapp', 'baileys'].includes(platform));
+                const isPlatformMatch = templatePlatform === platform || (['whatsapp', 'baileys'].includes(templatePlatform) && ['whatsapp', 'baileys'].includes(platform)) || ['telegram', 'facebook', 'instagram'].includes(platform);
                 if (!isPlatformMatch) {
                     continue;
                 }
@@ -122,7 +122,7 @@ export const findMatchingBot = async (accountId, text, platform = 'whatsapp', co
             const sequence = await Sequence.findById(bot.reply_id).lean();
             if (sequence) {
                 const sequencePlatform = sequence.platform || 'whatsapp';
-                const isPlatformMatch = sequencePlatform === platform || (['whatsapp', 'baileys'].includes(sequencePlatform) && ['whatsapp', 'baileys'].includes(platform));
+                const isPlatformMatch = sequencePlatform === platform || (['whatsapp', 'baileys'].includes(sequencePlatform) && ['whatsapp', 'baileys'].includes(platform)) || ['telegram', 'facebook', 'instagram'].includes(platform);
                 if (!isPlatformMatch) {
                     continue;
                 }
@@ -159,7 +159,7 @@ export const findMatchingBot = async (accountId, text, platform = 'whatsapp', co
     return null;
 };
 
-export const sendOmnichannelMessageHelper = async ({ contactDoc, messageType, text, fileUrl, buttons, location }) => {
+export const sendOmnichannelMessageHelper = async ({ contactDoc, messageType, text, fileUrl, buttons, location, isTemplate, templateId, templateObj }) => {
     try {
         const platform = contactDoc.source;
         const userId = contactDoc.user_id;
@@ -188,6 +188,7 @@ export const sendOmnichannelMessageHelper = async ({ contactDoc, messageType, te
             await omnichannelService.sendMessage({
                 platform,
                 workspace_id: workspaceId,
+                user_id: userId,
                 recipient_id: contactDoc.telegram_chat_id,
                 message_type: msgType,
                 text,
@@ -248,6 +249,7 @@ export const sendOmnichannelMessageHelper = async ({ contactDoc, messageType, te
             await omnichannelService.sendMessage({
                 platform,
                 workspace_id: workspaceId,
+                user_id: userId,
                 page_id: pageId,
                 recipient_id: platform === 'facebook' ? contactDoc.facebook_page_scoped_id : contactDoc.instagram_scoped_id,
                 message_type: msgType,
@@ -270,7 +272,8 @@ export const sendOmnichannelMessageHelper = async ({ contactDoc, messageType, te
             sender_id: senderId,
             recipient_id: platform === 'telegram' ? contactDoc.telegram_chat_id : (platform === 'facebook' ? contactDoc.facebook_page_scoped_id : contactDoc.instagram_scoped_id),
             direction: 'outbound',
-            message_type: msgType,
+            message_type: isTemplate ? 'template' : msgType,
+            template_id: isTemplate ? templateId : undefined,
             content: text,
             file_url: dbFileUrl,
             from_me: true,
@@ -284,8 +287,10 @@ export const sendOmnichannelMessageHelper = async ({ contactDoc, messageType, te
             const formattedMessage = {
                 id: newMessage._id.toString(),
                 content: newMessage.content,
+                interactiveData: newMessage.interactive_data || null,
                 messageType: newMessage.message_type,
                 fileUrl: newMessage.file_url || null,
+                template: templateObj || null,
                 createdAt: newMessage.wa_timestamp,
                 can_chat: true,
                 delivered_at: new Date(),
@@ -387,23 +392,209 @@ export const sendAutomatedReply = async (params) => {
         if (replyType === 'chatbot') {
             const chatbot = await Chatbot.findById(replyId).populate('ai_model');
 
-            if (chatbot) {
-                const aiResponse = await callAIModel(userId, chatbot.ai_model, chatbot.api_key, `${chatbot.system_prompt}\n\nCustomer: ${incomingText}`);
-                console.log("airesponse", aiResponse);
+            if (chatbot && chatbot.status === 'active') {
+                if (contactDoc.chatbot_overrides) {
+                    const overrides = contactDoc.chatbot_overrides;
+                    if (overrides.tone) chatbot.tone = overrides.tone;
+                    if (overrides.message_limit !== undefined) chatbot.message_limit = overrides.message_limit;
+                    if (overrides.enable_human_handoff !== undefined) chatbot.enable_human_handoff = overrides.enable_human_handoff;
+                    if (overrides.handoff_keywords) chatbot.handoff_keywords = overrides.handoff_keywords;
+                    if (overrides.handoff_message) chatbot.handoff_message = overrides.handoff_message;
+                }
+
+                if (contactDoc.chatbot_paused) {
+                    console.log(`[Chatbot] AI Agent is paused for contact ${contactDoc._id}, skipping.`);
+                    return;
+                }
+
+                if (chatbot.message_limit > 0 && contactDoc.ai_message_count >= chatbot.message_limit) {
+                    console.log(`[Chatbot] Message limit reached for contact ${contactDoc._id}`);
+                    contactDoc.chatbot_paused = true;
+                    contactDoc.assigned_chatbot = null;
+                    await contactDoc.save();
+
+                    const io = unifiedWhatsAppService.io;
+                    if (io) {
+                        io.emit('agent:escalation', {
+                            contact_id: contactDoc._id.toString(),
+                            user_id: userId,
+                            message: "AI Agent reached maximum message limit",
+                            timestamp: new Date().toISOString()
+                        });
+                    }
+
+                    const handoffMessage = chatbot.handoff_message || "I'm connecting you with a human agent now. Someone will be with you shortly.";
+                    if (isOmnichannel) {
+                        await sendOmnichannelMessageHelper({
+                            contactDoc,
+                            messageType: 'text',
+                            text: handoffMessage
+                        });
+                    } else {
+                        await unifiedWhatsAppService.sendMessage(userId, {
+                            recipientNumber: params.senderNumber,
+                            messageText: handoffMessage,
+                            messageType: 'text',
+                            whatsappPhoneNumberId
+                        });
+                    }
+                    return;
+                }
+
+                if (chatbot.enable_human_handoff && chatbot.handoff_keywords && chatbot.handoff_keywords.length > 0) {
+                    const incomingTextLower = incomingText.toLowerCase();
+                    const isKeywordHandoff = chatbot.handoff_keywords.some(kw => incomingTextLower.includes(kw.toLowerCase()));
+
+                    if (isKeywordHandoff) {
+                        console.log(`[Chatbot] Keyword Handoff triggered for contact ${contactDoc._id}`);
+                        contactDoc.chatbot_paused = true;
+                        contactDoc.assigned_chatbot = null;
+                        await contactDoc.save();
+
+                        const io = unifiedWhatsAppService.io;
+                        if (io) {
+                            io.emit('agent:escalation', {
+                                contact_id: contactDoc._id.toString(),
+                                user_id: userId,
+                                message: "User requested human agent via keyword",
+                                timestamp: new Date().toISOString()
+                            });
+                        }
+
+                        const handoffMessage = chatbot.handoff_message || "I'm connecting you with a human agent now. Someone will be with you shortly.";
+                        
+                        if (isOmnichannel) {
+                            await sendOmnichannelMessageHelper({
+                                contactDoc,
+                                messageType: 'text',
+                                text: handoffMessage
+                            });
+                        } else {
+                            await unifiedWhatsAppService.sendMessage(userId, {
+                                recipientNumber: params.senderNumber,
+                                messageText: handoffMessage,
+                                messageType: 'text',
+                                whatsappPhoneNumberId
+                            });
+                        }
+                        return;
+                    }
+                }
+
+                let agentInstructions = `\n\n--- SYSTEM INSTRUCTIONS ---\nYou are an advanced AI Agent. You MUST respond with a valid JSON object only. Do not output markdown code blocks or any other text outside the JSON.\nThe JSON must have the following keys:\n- "reply_text": (string) Your actual helpful response to the user.`;
+                
+                if (chatbot.enable_human_handoff) {
+                    agentInstructions += `\n- "needs_handoff": (boolean) Set to true ONLY if the user is frustrated, angry, explicitly asks for a human agent, or if you cannot resolve their issue. Otherwise false.`;
+                } else {
+                    agentInstructions += `\n- "needs_handoff": (boolean) Always false.`;
+                }
+
+                if (chatbot.enable_google_meet) {
+                    agentInstructions += `\n- "action": (string) If the user explicitly asks for a meeting, a video call, or to schedule a call, return "generate_google_meet". Otherwise return null.`;
+                } else {
+                    agentInstructions += `\n- "action": (string) Always null.`;
+                }
+
+                const fullPrompt = `${chatbot.system_prompt || ''}${agentInstructions}\n\nCustomer: ${incomingText}`;
+
+                let aiResponseText = await callAIModel(userId, chatbot.ai_model, chatbot.api_key, fullPrompt);
+                let aiResponseObj;
+                
+                try {
+                    const cleanJsonStr = aiResponseText.replace(/^```json/im, '').replace(/^```/im, '').replace(/```$/m, '').trim();
+                    aiResponseObj = JSON.parse(cleanJsonStr);
+                } catch (e) {
+                    console.warn('[Chatbot] Failed to parse AI JSON, falling back to raw text');
+                    aiResponseObj = { reply_text: aiResponseText, needs_handoff: false, action: null };
+                }
+
+                if (chatbot.enable_human_handoff && aiResponseObj.needs_handoff) {
+                    console.log(`[Chatbot] Handoff triggered for contact ${contactDoc._id}`);
+                    contactDoc.chatbot_paused = true;
+                    contactDoc.assigned_chatbot = null;
+                    await contactDoc.save();
+
+                    const io = unifiedWhatsAppService.io;
+                    if (io) {
+                        io.emit('agent:escalation', {
+                            contact_id: contactDoc._id.toString(),
+                            user_id: userId,
+                            message: "AI Agent requested human handoff",
+                            timestamp: new Date().toISOString()
+                        });
+                    }
+                }
+
+                let finalReplyText = aiResponseObj.reply_text || "I'm having trouble processing that right now.";
+
+                if (chatbot.enable_google_meet && aiResponseObj.action === 'generate_google_meet') {
+                    try {
+                        const { default: GoogleAccount } = await import('../models/google-account.model.js');
+                        const { getCalendarClient } = await import('./google-api-helper.js');
+                        
+                        const googleAccount = await GoogleAccount.findOne({ user_id: userId, status: 'active', deleted_at: null });
+                        if (googleAccount) {
+                            const calendarClient = await getCalendarClient(googleAccount._id);
+                            const start = new Date();
+                            const end = new Date(start.getTime() + 60 * 60 * 1000);
+                            const event = await calendarClient.events.insert({
+                                calendarId: 'primary',
+                                conferenceDataVersion: 1,
+                                requestBody: {
+                                    summary: `Meeting with ${contactDoc.name || 'Client'}`,
+                                    start: { dateTime: start.toISOString() },
+                                    end: { dateTime: end.toISOString() },
+                                    conferenceData: { createRequest: { requestId: `meet_${Date.now()}` } }
+                                }
+                            });
+                            const meetLink = event.data.hangoutLink;
+                            if (meetLink) {
+                                finalReplyText += `\n\nHere is the Google Meet link for our meeting: ${meetLink}`;
+                            }
+                        }
+                    } catch (meetErr) {
+                        console.error('[Chatbot] Error generating Google Meet link:', meetErr);
+                    }
+                }
+
+                let messageTypeToSend = 'text';
+                let messageFile = null;
+
+                if (chatbot.voice_settings && chatbot.voice_settings.enabled) {
+                    const voiceProvider = chatbot.voice_settings.provider || null;
+
+                    const { generateSpeech } = await import('./voice-ai.service.js');
+                    console.log(`[Chatbot] Generating voice response via TTS...`);
+                    const ttsResult = await generateSpeech(finalReplyText, chatbot.voice_settings.voice_id, chatbot.api_key, chatbot.ai_model, voiceProvider);
+                    if (ttsResult && ttsResult.buffer) {
+                        messageTypeToSend = 'audio';
+                        messageFile = {
+                            buffer: ttsResult.buffer,
+                            mimetype: 'audio/mpeg',
+                            originalname: ttsResult.fileName || 'audio_message.mp3'
+                        };
+                    }
+                }
+
                 if (isOmnichannel) {
-                    await sendOmnichannelMessageHelper({
+                   await sendOmnichannelMessageHelper({
                         contactDoc,
                         messageType: 'text',
-                        text: aiResponse
+                        text: finalReplyText
                     });
                 } else {
                     await unifiedWhatsAppService.sendMessage(userId, {
                         recipientNumber: params.senderNumber,
-                        messageText: aiResponse,
-                        messageType: 'text',
+                        messageText: finalReplyText,
+                        messageType: messageTypeToSend,
+                        file: messageFile,
                         whatsappPhoneNumberId
                     });
                 }
+
+                contactDoc.ai_message_count = (contactDoc.ai_message_count || 0) + 1;
+                await contactDoc.save();
+
                 return;
             }
         }
@@ -493,12 +684,44 @@ export const sendAutomatedReply = async (params) => {
             }
         }
 
+        if (automationData.templateVariables) {
+            const rawVars = automationData.templateVariables instanceof Map ? Object.fromEntries(automationData.templateVariables) : automationData.templateVariables;
+            const resolvedVars = {};
+            for (const [key, value] of Object.entries(rawVars)) {
+                if (value === undefined || value === null) continue;
+                const strVal = String(value).trim();
+                const match = strVal.match(/^\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}$/);
 
+                let resolved = strVal;
+                if (match) {
+                    const fieldName = match[1];
+                    resolved = '';
+                    if (contactDoc) {
+                        if (fieldName in contactDoc && contactDoc[fieldName] != null) {
+                            resolved = String(contactDoc[fieldName]);
+                        } else if (contactDoc.custom_fields) {
+                            const cf = contactDoc.custom_fields;
+                            const val = typeof cf.get === 'function' ? cf.get(fieldName) : cf[fieldName];
+                            if (val != null) resolved = String(val);
+                        }
+                    }
+                    if (!resolved || resolved.trim() === '') {
+                        const lowerField = fieldName.toLowerCase();
+                        resolved = lowerField.includes('name') ? 'Customer' : 'N/A';
+                    }
+                }
+                resolvedVars[key] = resolved;
+            }
+            automationData.templateVariables = resolvedVars;
+        }
 
         if (isOmnichannel) {
             let msgType = 'text';
             let msgText = '';
             let fileUrl = '';
+            let isTemplate = false;
+            let templateObj = null;
+            let buttons = undefined;
 
             if (replyType === 'ReplyMaterial' || replyType === 'replymaterial' || ['text', 'media', 'image', 'video', 'audio', 'document'].includes(replyType)) {
                 const material = await ReplyMaterial.findById(replyId).lean();
@@ -514,6 +737,8 @@ export const sendAutomatedReply = async (params) => {
             } else if (replyType === 'template' || replyType === 'Template') {
                 const template = await Template.findById(replyId).lean();
                 if (template) {
+                    isTemplate = true;
+                    templateObj = template;
                     msgType = 'text';
                     msgText = template.message_body || '';
 
@@ -525,9 +750,16 @@ export const sendAutomatedReply = async (params) => {
                         }
                     }
 
-                    if (template.header && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes((template.header.format || '').toUpperCase())) {
+                    if (template.header && (
+                        ['IMAGE', 'VIDEO', 'DOCUMENT'].includes((template.header.format || '').toUpperCase()) ||
+                        template.header.format === 'media'
+                    )) {
                         fileUrl = automationData?.mediaUrl || template.header.media_url;
                         msgType = (template.header.media_type || template.header.format || 'image').toLowerCase();
+                    }
+
+                    if (template.buttons && template.buttons.length > 0) {
+                        buttons = template.buttons;
                     }
                 }
             }
@@ -536,7 +768,11 @@ export const sendAutomatedReply = async (params) => {
                 contactDoc,
                 messageType: msgType,
                 text: msgText,
-                fileUrl
+                fileUrl,
+                buttons,
+                isTemplate,
+                templateId: replyId,
+                templateObj
             });
             return;
         }
@@ -728,20 +964,31 @@ export const processAutomatedPipeline = async ({
                     automatedHandled = true;
                 }
             }
-        } else if (channel === 'telegram') {
-            const bot = await db.TelegramConnection.findOne({ workspace_id: workspaceId, is_active: true }).lean();
-            if (bot) connectionId = bot._id;
-        } else if (channel === 'facebook') {
-            const page = await db.FacebookConnection.findOne({ workspace_id: workspaceId, is_active: true }).lean();
-            if (page) connectionId = page._id;
-        } else if (channel === 'instagram') {
-            const ig = await db.InstagramConnection.findOne({ workspace_id: workspaceId, is_active: true }).lean();
-            if (ig) connectionId = ig._id;
+        } else {
+            const waba = await WhatsappWaba.findOne({ workspace_id: workspaceId, deleted_at: null });
+            if (waba) {
+                wabaId = waba._id;
+            }
+
+            if (channel === 'telegram') {
+                const bot = await db.TelegramConnection.findOne({ workspace_id: workspaceId, is_active: true }).lean();
+                if (bot) connectionId = bot._id;
+            } else if (channel === 'facebook') {
+                const page = await db.FacebookConnection.findOne({ workspace_id: workspaceId, is_active: true }).lean();
+                if (page) connectionId = page._id;
+            } else if (channel === 'instagram') {
+                const ig = await db.InstagramConnection.findOne({ workspace_id: workspaceId, is_active: true }).lean();
+                if (ig) connectionId = ig._id;
+            }
         }
 
         if (!automatedHandled && connectionId) {
             let matchingBot = await findMatchingBot(connectionId, incomingText, channel, contactDoc);
-            
+
+            if (!matchingBot && wabaId) {
+                matchingBot = await findMatchingBot(wabaId, incomingText, channel, contactDoc);
+            }
+
             if (!matchingBot && workspaceId) {
                 matchingBot = await findMatchingBot(workspaceId, incomingText, channel, contactDoc);
             }
@@ -764,7 +1011,7 @@ export const processAutomatedPipeline = async ({
         }
 
         const isNewContact = (Date.now() - new Date(contactDoc.created_at).getTime() < 10000);
-        
+
         if (channel === 'whatsapp' || channel === 'baileys') {
             if (!automatedHandled && isNewContact && config?.welcome_message?.id) {
                 await sendAutomatedReply({

@@ -8,14 +8,40 @@ async function uploadMediaToWhatsApp({
   mime_type,
   filename
 }) {
+  let finalMimeType = mime_type;
+
+  // List of officially supported document MIME types by Meta WhatsApp Cloud API
+  const SUPPORTED_DOCUMENT_MIMES = [
+    'text/plain',
+    'application/pdf',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.ms-powerpoint',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+  ];
+
+  // List of other supported media MIME prefixes
+  const isImage = mime_type && mime_type.startsWith('image/');
+  const isVideo = mime_type && mime_type.startsWith('video/');
+  const isAudio = mime_type && mime_type.startsWith('audio/');
+
+  // If it's a document and not officially supported, map to text/plain
+  if (!isImage && !isVideo && !isAudio && mime_type && !SUPPORTED_DOCUMENT_MIMES.includes(mime_type)) {
+    console.log(`[UploadMedia] Mapping unsupported document MIME type "${mime_type}" to "text/plain" for filename "${filename}"`);
+    finalMimeType = 'text/plain';
+  }
+
   const form = new FormData();
 
+  const whatsAppType = getWhatsAppTypeFromMime(finalMimeType);
   form.append("messaging_product", "whatsapp");
-  form.append("type", mime_type);
+  form.append("type", whatsAppType);
 
   const fileOptions = {
-    filename: filename || 'audio.ogg',
-    contentType: mime_type
+    filename: filename || 'file.bin',
+    contentType: finalMimeType
   };
 
   if (mime_type.includes('audio/ogg') && !fileOptions.filename.endsWith('.ogg')) {
@@ -26,25 +52,35 @@ async function uploadMediaToWhatsApp({
 
   console.log('[UploadMedia] Uploading to WhatsApp:', {
     phone_number_id,
-    mime_type,
+    mime_type: finalMimeType,
+    original_mime_type: mime_type,
     filename: fileOptions.filename,
     bufferSize: buffer.length
   });
 
-  const response = await axios.post(
-    `https://graph.facebook.com/v19.0/${phone_number_id}/media`,
-    form,
-    {
-      headers: {
-        Authorization: `Bearer ${access_token}`,
-        ...form.getHeaders()
-      },
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity
-    }
-  );
+  try {
+    const response = await axios.post(
+      `https://graph.facebook.com/v19.0/${phone_number_id}/media`,
+      form,
+      {
+        headers: {
+          Authorization: `Bearer ${access_token}`,
+          ...form.getHeaders()
+        },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity
+      }
+    );
 
-  return response.data.id;
+    return response.data.id;
+  } catch (err) {
+    let errorMsg = err.message;
+    if (err.response && err.response.data && err.response.data.error) {
+      errorMsg = err.response.data.error.message || err.response.data.error.error_user_msg || JSON.stringify(err.response.data.error);
+    }
+    console.error('[UploadMedia] Error uploading media to WhatsApp:', errorMsg);
+    throw new Error(`Media upload failed: ${errorMsg}`);
+  }
 }
 
 function getWhatsAppTypeFromMime(mime) {

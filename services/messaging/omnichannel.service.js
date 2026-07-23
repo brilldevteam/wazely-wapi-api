@@ -47,15 +47,23 @@ class OmnichannelService {
             let tagOptions = { ...options };
             if (['facebook', 'instagram'].includes(platform)) {
                 const { Contact } = await import('../../models/index.js');
-                const contactDoc = await Contact.findOne({
+                const contactQuery = {
                     $or: [
                         { facebook_page_scoped_id: recipient_id },
                         { instagram_scoped_id: recipient_id }
-                    ],
-                    workspace_id
-                }).lean();
+                    ]
+                };
 
-                if (contactDoc && contactDoc.last_incoming_message_at) {
+                const targetUserId = options.user_id || options.userId;
+                if (targetUserId) {
+                    contactQuery.user_id = targetUserId;
+                } else if (workspace_id) {
+                    contactQuery.workspace_id = workspace_id;
+                }
+
+                const contactDoc = await Contact.findOne(contactQuery).lean();
+
+                if (contactDoc && contactDoc.last_incoming_message_at && !options.reply_to_comment_id) {
                     const diffMs = Date.now() - new Date(contactDoc.last_incoming_message_at).getTime();
                     const diffHours = diffMs / (1000 * 60 * 60);
                     if (diffHours > 24) {
@@ -173,21 +181,47 @@ class OmnichannelService {
 
                 if (message_type === 'text' || message_type === 'link') {
                     return await instagramProvider.sendTextMessage(pageAccessToken, recipient_id, text, tagOptions);
-                } else if (['image', 'video', 'audio', 'file'].includes(message_type)) {
-                    if (!resolvedFileUrl) throw new Error(`file_url is required for ${message_type} messages on Instagram`);
-                    if (buttons && Array.isArray(buttons) && buttons.length > 0) {
-                        return await instagramProvider.sendInteractiveMessage(pageAccessToken, recipient_id, text || "Message", buttons, resolvedFileUrl, tagOptions);
+                } else if (['image', 'video', 'audio', 'file'].includes(message_type) || message_type === 'interactive') {
+                    if (message_type !== 'interactive' && !resolvedFileUrl) {
+                        throw new Error(`file_url is required for ${message_type} messages on Instagram`);
                     }
+
+                    if (buttons && Array.isArray(buttons) && buttons.length > 0) {
+                        let ext = '';
+                        if (resolvedFileUrl) {
+                            const parts = resolvedFileUrl.split('/');
+                            const lastPart = parts[parts.length - 1];
+                            if (lastPart.includes('.')) {
+                                ext = lastPart.split('.').pop().split('?')[0].toLowerCase();
+                            }
+                        }
+                        const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
+                        const isImage = imageExts.includes(ext);
+
+                        if (resolvedFileUrl && !isImage) {
+                            // Send media first
+                            let resolvedMediaType = message_type;
+                            if (message_type === 'interactive') {
+                                if (['mp4', 'mkv', 'avi', 'mov', '3gp'].includes(ext)) resolvedMediaType = 'video';
+                                else if (['mp3', 'ogg', 'wav', 'aac', 'm4a'].includes(ext)) resolvedMediaType = 'audio';
+                                else resolvedMediaType = 'file';
+                            }
+                            const mediaResult = await instagramProvider.sendMediaMessage(pageAccessToken, recipient_id, resolvedMediaType, resolvedFileUrl, tagOptions);
+                            // Then send text with buttons (without image url)
+                            await instagramProvider.sendInteractiveMessage(pageAccessToken, recipient_id, text || "Message", buttons, null, tagOptions);
+                            return mediaResult;
+                        } else {
+                            // Send normally as single interactive template with image
+                            return await instagramProvider.sendInteractiveMessage(pageAccessToken, recipient_id, text || "Message", buttons, resolvedFileUrl, tagOptions);
+                        }
+                    }
+
+                    // No buttons: send media message normally
                     const result = await instagramProvider.sendMediaMessage(pageAccessToken, recipient_id, message_type, resolvedFileUrl, tagOptions);
                     if (text && text.trim().length > 0) {
                         try { await instagramProvider.sendTextMessage(pageAccessToken, recipient_id, text, tagOptions); } catch (e) { console.error("Text with media error:", e); }
                     }
                     return result;
-                } else if (message_type === 'interactive') {
-                    if (!buttons || !Array.isArray(buttons) || buttons.length === 0) {
-                        throw new Error("buttons array is required for interactive messages on Instagram");
-                    }
-                    return await instagramProvider.sendInteractiveMessage(pageAccessToken, recipient_id, text, buttons, resolvedFileUrl, tagOptions);
                 } else if (message_type === 'carousel') {
                     if (!carousel_elements || !Array.isArray(carousel_elements)) {
                         throw new Error("carousel_elements array is required for carousel messages on Instagram");
@@ -219,21 +253,47 @@ class OmnichannelService {
 
                 if (message_type === 'text' || message_type === 'link') {
                     return await facebookProvider.sendTextMessage(page.page_access_token, recipient_id, text, tagOptions);
-                } else if (['image', 'video', 'audio', 'file'].includes(message_type)) {
-                    if (!resolvedFileUrl) throw new Error(`file_url is required for ${message_type} messages on Facebook`);
-                    if (buttons && Array.isArray(buttons) && buttons.length > 0) {
-                        return await facebookProvider.sendInteractiveMessage(page.page_access_token, recipient_id, text || "Message", buttons, resolvedFileUrl, tagOptions);
+                } else if (['image', 'video', 'audio', 'file'].includes(message_type) || message_type === 'interactive') {
+                    if (message_type !== 'interactive' && !resolvedFileUrl) {
+                        throw new Error(`file_url is required for ${message_type} messages on Facebook`);
                     }
+
+                    if (buttons && Array.isArray(buttons) && buttons.length > 0) {
+                        let ext = '';
+                        if (resolvedFileUrl) {
+                            const parts = resolvedFileUrl.split('/');
+                            const lastPart = parts[parts.length - 1];
+                            if (lastPart.includes('.')) {
+                                ext = lastPart.split('.').pop().split('?')[0].toLowerCase();
+                            }
+                        }
+                        const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
+                        const isImage = imageExts.includes(ext);
+
+                        if (resolvedFileUrl && !isImage) {
+                            // Send media first
+                            let resolvedMediaType = message_type;
+                            if (message_type === 'interactive') {
+                                if (['mp4', 'mkv', 'avi', 'mov', '3gp'].includes(ext)) resolvedMediaType = 'video';
+                                else if (['mp3', 'ogg', 'wav', 'aac', 'm4a'].includes(ext)) resolvedMediaType = 'audio';
+                                else resolvedMediaType = 'file';
+                            }
+                            const mediaResult = await facebookProvider.sendMediaMessage(page.page_access_token, recipient_id, resolvedMediaType, resolvedFileUrl, tagOptions);
+                            // Then send text with buttons (without image url)
+                            await facebookProvider.sendInteractiveMessage(page.page_access_token, recipient_id, text || "Message", buttons, null, tagOptions);
+                            return mediaResult;
+                        } else {
+                            // Send normally as single interactive template with image
+                            return await facebookProvider.sendInteractiveMessage(page.page_access_token, recipient_id, text || "Message", buttons, resolvedFileUrl, tagOptions);
+                        }
+                    }
+
+                    // No buttons: send media message normally
                     const result = await facebookProvider.sendMediaMessage(page.page_access_token, recipient_id, message_type, resolvedFileUrl, tagOptions);
                     if (text && text.trim().length > 0) {
                         try { await facebookProvider.sendTextMessage(page.page_access_token, recipient_id, text, tagOptions); } catch (e) { console.error("Text with media error:", e); }
                     }
                     return result;
-                } else if (message_type === 'interactive') {
-                    if (!buttons || !Array.isArray(buttons) || buttons.length === 0) {
-                        throw new Error("buttons array is required for interactive messages on Facebook");
-                    }
-                    return await facebookProvider.sendInteractiveMessage(page.page_access_token, recipient_id, text, buttons, resolvedFileUrl, tagOptions);
                 } else if (message_type === 'carousel') {
                     if (!carousel_elements || !Array.isArray(carousel_elements)) {
                         throw new Error("carousel_elements array is required for carousel messages on Facebook");

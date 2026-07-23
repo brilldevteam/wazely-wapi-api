@@ -15,8 +15,13 @@ router.use(requireSubscription);
 router.post('/', checkPlanLimit('campaigns'), uploader('campaigns').fields([{ name: 'file_url', maxCount: 1 }, { name: 'carousel_files' }]), checkPermission('create.campaigns'), campaignController.createCampaign);
 router.get('/', checkPermission('view.campaigns'), campaignController.getAllCampaigns);
 router.get('/:id', checkPermission('view.campaigns'), campaignController.getCampaignById);
+router.get('/:id/insights', checkPermission('view.campaigns'), campaignController.getCampaignInsights);
 router.put('/:id', checkPermission('update.campaigns'), campaignController.updateCampaign);
 router.delete('/:id', checkPermission('delete.campaigns'), campaignController.deleteCampaign);
+router.post('/:id/publish', checkPermission('update.campaigns'), campaignController.publishCampaign);
+router.post('/:id/resend', checkPermission('create.campaigns'), campaignController.resendCampaign);
 router.post('/:id/send', checkPermission('create.campaigns'), campaignController.sendCampaign);
+router.post('/:id/toggle-pause', checkPermission('update.campaigns'), campaignController.togglePauseCampaign);
+router.post('/:id/setup-recurring', checkPermission('update.campaigns'), campaignController.setupRecurringCampaign);
 
 export default router;

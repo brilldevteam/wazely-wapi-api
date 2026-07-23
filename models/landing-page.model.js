@@ -84,13 +84,20 @@ const platformSectionSchema = new mongoose.Schema({
   items: [platformItemSchema]
 });
 
+const pricingTabSchema = new mongoose.Schema({
+  key: { type: String, enum: ['free Trial', 'monthly', 'yearly', 'lifetime'], required: true },
+  value: { type: String, required: true },
+  badge: { type: String }
+}, { _id: false });
+
 const pricingSectionSchema = new mongoose.Schema({
   title: { type: String },
   badge: { type: String },
   description: { type: String },
   subscribed_count: { type: String },
   subscribed_user: { type: String },
-  plans: [pricingPlanSchema]
+  plans: [pricingPlanSchema],
+  tabs: [pricingTabSchema]
 });
 
 const testimonialsSectionSchema = new mongoose.Schema({

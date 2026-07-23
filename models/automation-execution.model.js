@@ -65,6 +65,13 @@ const automationExecutionSchema = new mongoose.Schema({
   },
   error: {
     type: mongoose.Schema.Types.Mixed
+  },
+  timeout_at: {
+    type: Date
+  },
+  retry_count: {
+    type: Number,
+    default: 0
   }
 }, {
   timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
@@ -84,5 +91,6 @@ automationExecutionSchema.index({ completed_at: -1 });
 automationExecutionSchema.index({ user_id: 1, started_at: -1 });
 automationExecutionSchema.index({ flow_id: 1, started_at: -1 });
 automationExecutionSchema.index({ status: 1, created_at: -1 });
+automationExecutionSchema.index({ status: 1, timeout_at: 1 });
 
 export default mongoose.model('AutomationExecution', automationExecutionSchema);

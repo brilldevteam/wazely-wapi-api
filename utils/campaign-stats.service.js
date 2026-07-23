@@ -21,123 +21,155 @@ export const updateCampaignStatsFromMessage = async (messageId, newStatus, times
       return null;
     }
 
-    const campaign = await Campaign.findById(campaignId);
-    if (!campaign) {
-      console.log(`Campaign not found: ${campaignId}`);
-      return null;
-    }
-
-    let statusUpdate = {};
-    let campaignStatsUpdate = {};
-
-    switch (newStatus) {
-      case 'sent':
-        statusUpdate.status = 'sent';
-        statusUpdate.sent_at = timestamp || new Date();
-        campaignStatsUpdate.sent_count = (campaign.stats.sent_count || 0) + 1;
-        campaignStatsUpdate.pending_count = Math.max(0, (campaign.stats.pending_count || 0) - 1);
-        break;
-
-      case 'delivered':
-        statusUpdate.status = 'delivered';
-        statusUpdate.delivered_at = timestamp || new Date();
-        campaignStatsUpdate.delivered_count = (campaign.stats.delivered_count || 0) + 1;
-        break;
-
-      case 'read':
-        statusUpdate.status = 'read';
-        statusUpdate.read_at = timestamp || new Date();
-        campaignStatsUpdate.read_count = (campaign.stats.read_count || 0) + 1;
-        break;
-
-      case 'failed':
-        statusUpdate.status = 'failed';
-        statusUpdate.failed_at = timestamp || new Date();
-        statusUpdate.failure_reason = failureReason || message.metadata?.error || 'WhatsApp reported message failed';
-        campaignStatsUpdate.failed_count = (campaign.stats.failed_count || 0) + 1;
-        campaignStatsUpdate.pending_count = Math.max(0, (campaign.stats.pending_count || 0) - 1);
-        break;
-
-      default:
-        console.log(`Unknown status: ${newStatus}`);
-        return null;
-    }
 
     const recipientQuery = message.contact_id
       ? { _id: campaignId, "recipients.contact_id": message.contact_id }
       : { _id: campaignId, "recipients.phone_number": message.recipient_number };
 
-    const currentCampaign = await Campaign.findById(campaignId);
+    const currentCampaign = await Campaign.findOne(
+      recipientQuery,
+      {
+        stats: 1,
+        status: 1,
+        sent_at: 1,
+        error_log: 1,
+        recipients: {
+          $elemMatch: message.contact_id
+            ? { contact_id: message.contact_id }
+            : { phone_number: message.recipient_number }
+        }
+      }
+    ).lean();
+
     if (!currentCampaign) {
-      console.log(`Campaign not found: ${campaignId}`);
+      console.log(`Campaign ${campaignId} or recipient not found`);
       return null;
     }
 
-    const recipient = currentCampaign.recipients.find(r =>
-      (message.contact_id && r.contact_id?.toString() === message.contact_id.toString()) ||
-      (r.phone_number === message.recipient_number)
-    );
-
+    const recipient = currentCampaign.recipients && currentCampaign.recipients[0];
     if (!recipient) {
       console.log(`Recipient not found in campaign ${campaignId}`);
       return null;
     }
 
-    console.log(`Current recipient status: ${recipient.status}, new status: ${newStatus}`);
+    const oldStatus = recipient.status || 'pending';
+    
+    // Define the valid hierarchy to prevent out-of-order webhooks from overwriting more advanced statuses
+    const statusSeverity = {
+      'pending': 0,
+      'sent': 1,
+      'delivered': 2,
+      'read': 3,
+      'failed': 4
+    };
 
-    let shouldIncrementStats = false;
+    const isStatusDowngrade = statusSeverity[oldStatus] >= statusSeverity[newStatus];
+    
+    // Exception: we can transition to 'failed' from any status other than 'failed' itself
+    const canTransition = !isStatusDowngrade || (newStatus === 'failed' && oldStatus !== 'failed');
 
-    switch (newStatus) {
-      case 'sent':
-        shouldIncrementStats = recipient.status !== 'sent';
-        break;
-      case 'delivered':
-        shouldIncrementStats = recipient.status === 'sent';
-        break;
-      case 'read':
-        shouldIncrementStats = recipient.status === 'delivered' || recipient.status === 'sent';
-        break;
-      case 'failed':
-        shouldIncrementStats = recipient.status !== 'failed';
-        break;
+    if (!canTransition) {
+      console.log(`Skipping status update for campaign ${campaignId} - status already processed or downgrade prevented: ${oldStatus} -> ${newStatus}`);
+      return {
+        campaignId: currentCampaign._id,
+        stats: currentCampaign.stats,
+        status: currentCampaign.status
+      };
     }
-
-    console.log(`Should increment stats: ${shouldIncrementStats}`);
 
     const recipientUpdate = {
       $set: {
-        "recipients.$.status": statusUpdate.status,
+        "recipients.$.status": newStatus,
         "recipients.$.updated_at": new Date()
       }
     };
 
-    if (statusUpdate.sent_at) {
-      recipientUpdate.$set["recipients.$.sent_at"] = statusUpdate.sent_at;
-    }
-    if (statusUpdate.delivered_at) {
-      recipientUpdate.$set["recipients.$.delivered_at"] = statusUpdate.delivered_at;
-    }
-    if (statusUpdate.read_at) {
-      recipientUpdate.$set["recipients.$.read_at"] = statusUpdate.read_at;
-    }
-    if (statusUpdate.failed_at) {
-      recipientUpdate.$set["recipients.$.failed_at"] = statusUpdate.failed_at;
-    }
-    if (statusUpdate.failure_reason) {
-      recipientUpdate.$set["recipients.$.failure_reason"] = statusUpdate.failure_reason;
+    const now = timestamp || new Date();
+    if (newStatus === 'sent') recipientUpdate.$set["recipients.$.sent_at"] = now;
+    if (newStatus === 'delivered') recipientUpdate.$set["recipients.$.delivered_at"] = now;
+    if (newStatus === 'read') recipientUpdate.$set["recipients.$.read_at"] = now;
+    if (newStatus === 'failed') {
+      recipientUpdate.$set["recipients.$.failed_at"] = now;
+      failureReason = failureReason || message.metadata?.error || 'WhatsApp reported message failed';
+      recipientUpdate.$set["recipients.$.failure_reason"] = failureReason;
     }
 
-    await Campaign.updateOne(
-      recipientQuery,
-      recipientUpdate
-    );
+    const incUpdate = {};
 
-    if (newStatus === 'failed' && statusUpdate.failure_reason) {
-      const duplicateError = currentCampaign.error_log?.some(log =>
-        (message.contact_id ? log.contact_id?.toString() === message.contact_id.toString() : log.phone_number === message.recipient_number) &&
-        log.error === statusUpdate.failure_reason
+    if (newStatus === 'sent' && oldStatus === 'pending') {
+      incUpdate['stats.sent_count'] = 1;
+      incUpdate['stats.pending_count'] = -1;
+    } 
+    else if (newStatus === 'delivered') {
+      if (oldStatus === 'pending') {
+        incUpdate['stats.delivered_count'] = 1;
+        incUpdate['stats.sent_count'] = 1;
+        incUpdate['stats.pending_count'] = -1;
+      } else if (oldStatus === 'sent') {
+        incUpdate['stats.delivered_count'] = 1;
+      }
+    } 
+    else if (newStatus === 'read') {
+      if (oldStatus === 'pending') {
+        incUpdate['stats.read_count'] = 1;
+        incUpdate['stats.delivered_count'] = 1;
+        incUpdate['stats.sent_count'] = 1;
+        incUpdate['stats.pending_count'] = -1;
+      } else if (oldStatus === 'sent') {
+        incUpdate['stats.read_count'] = 1;
+        incUpdate['stats.delivered_count'] = 1;
+      } else if (oldStatus === 'delivered') {
+        incUpdate['stats.read_count'] = 1;
+      }
+    } 
+    else if (newStatus === 'failed') {
+      if (oldStatus === 'pending') {
+        incUpdate['stats.failed_count'] = 1;
+        incUpdate['stats.pending_count'] = -1;
+      } else if (oldStatus === 'sent') {
+        incUpdate['stats.failed_count'] = 1;
+        incUpdate['stats.sent_count'] = -1;
+      } else if (oldStatus === 'delivered') {
+        incUpdate['stats.failed_count'] = 1;
+        incUpdate['stats.delivered_count'] = -1;
+        incUpdate['stats.sent_count'] = -1;
+      } else if (oldStatus === 'read') {
+        incUpdate['stats.failed_count'] = 1;
+        incUpdate['stats.read_count'] = -1;
+        incUpdate['stats.delivered_count'] = -1;
+        incUpdate['stats.sent_count'] = -1;
+      }
+    }
+
+    let updatedCampaign;
+    if (Object.keys(incUpdate).length > 0) {
+      console.log(`Incrementing campaign ${campaignId} stats atomically:`, incUpdate);
+      updatedCampaign = await Campaign.findOneAndUpdate(
+        recipientQuery,
+        { ...recipientUpdate, $inc: incUpdate },
+        { new: true, select: 'stats status sent_at', runValidators: true }
+      ).lean();
+    } else {
+      console.log(`Updating recipient state without changing counters for campaign ${campaignId}`);
+      updatedCampaign = await Campaign.findOneAndUpdate(
+        recipientQuery,
+        recipientUpdate,
+        { new: true, select: 'stats status sent_at' }
+      ).lean();
+    }
+
+    if (!updatedCampaign) {
+      console.log(`Campaign not found for ID: ${campaignId}`);
+      return null;
+    }
+
+    if (newStatus === 'failed' && failureReason) {
+      const duplicateError = currentCampaign.error_log?.some((log) =>
+        (message.contact_id
+          ? log.contact_id?.toString() === message.contact_id.toString()
+          : log.phone_number === message.recipient_number) &&
+        log.error === failureReason
       );
-
       if (!duplicateError) {
         await Campaign.updateOne(
           { _id: campaignId },
@@ -147,102 +179,51 @@ export const updateCampaignStatsFromMessage = async (messageId, newStatus, times
                 timestamp: timestamp || new Date(),
                 contact_id: message.contact_id || null,
                 phone_number: message.recipient_number,
-                error: statusUpdate.failure_reason
-              }
-            }
+                error: failureReason,
+              },
+            },
           }
         );
       }
     }
 
-    let updatedCampaign;
-    if (shouldIncrementStats) {
-      const statsUpdate = {};
+    const totalRecipients = updatedCampaign.stats.total_recipients || 0;
+    const sentCount = updatedCampaign.stats.sent_count || 0;
+    const deliveredCount = updatedCampaign.stats.delivered_count || 0;
+    const readCount = updatedCampaign.stats.read_count || 0;
+    const failedCount = updatedCampaign.stats.failed_count || 0;
 
-      if (campaignStatsUpdate.sent_count !== undefined) {
-        statsUpdate['stats.sent_count'] = campaignStatsUpdate.sent_count;
-      }
-      if (campaignStatsUpdate.delivered_count !== undefined) {
-        statsUpdate['stats.delivered_count'] = campaignStatsUpdate.delivered_count;
-      }
-      if (campaignStatsUpdate.read_count !== undefined) {
-        statsUpdate['stats.read_count'] = campaignStatsUpdate.read_count;
-      }
-      if (campaignStatsUpdate.failed_count !== undefined) {
-        statsUpdate['stats.failed_count'] = campaignStatsUpdate.failed_count;
-      }
-      if (campaignStatsUpdate.pending_count !== undefined) {
-        statsUpdate['stats.pending_count'] = campaignStatsUpdate.pending_count;
-      }
-
-      statsUpdate.updated_at = new Date();
-
-      console.log(`Updating campaign ${campaignId} stats:`, statsUpdate);
-
-      updatedCampaign = await Campaign.findByIdAndUpdate(
-        campaignId,
-        { $set: statsUpdate },
-        { returnDocument: 'after', runValidators: true }
-      );
-    } else {
-      console.log(`Skipping stats update for campaign ${campaignId} - status already processed`);
-      updatedCampaign = await Campaign.findById(campaignId);
+    let newCampaignStatus = updatedCampaign.status;
+    if (failedCount > 0) {
+      newCampaignStatus = 'completed_with_errors';
+    } else if (readCount === totalRecipients && totalRecipients > 0) {
+      newCampaignStatus = 'completed';
+    } else if (deliveredCount + readCount === totalRecipients && totalRecipients > 0) {
+      newCampaignStatus = 'delivered';
     }
 
-    if (!updatedCampaign) {
-      console.log(`Campaign not found for ID: ${campaignId}`);
-      return null;
+    const finalUpdate = {};
+    if (newCampaignStatus !== updatedCampaign.status) {
+      finalUpdate.status = newCampaignStatus;
     }
 
-    if (updatedCampaign && updatedCampaign.recipients && updatedCampaign.recipients.length > 0) {
-      const recipientStatuses = updatedCampaign.recipients.map(r => r.status);
-
-      let newCampaignStatus = updatedCampaign.status;
-
-      if (recipientStatuses.includes('failed')) {
-        newCampaignStatus = 'completed_with_errors';
-      } else if (recipientStatuses.every(status => status === 'read')) {
-        newCampaignStatus = 'completed';
-      } else if (recipientStatuses.every(status => status === 'delivered' || status === 'read')) {
-        newCampaignStatus = 'delivered';
-      }
-
-      if (newCampaignStatus !== updatedCampaign.status) {
-        await Campaign.findByIdAndUpdate(campaignId, {
-          $set: {
-            status: newCampaignStatus,
-            updated_at: new Date()
-          }
-        });
-      }
-    }
-
-    const totalProcessed = (updatedCampaign.stats.sent_count || 0) +
-                          (updatedCampaign.stats.failed_count || 0);
-
-    if (totalProcessed >= updatedCampaign.stats.total_recipients &&
-        updatedCampaign.status === 'sending') {
-
-      const hasFailures = (updatedCampaign.stats.failed_count || 0) > 0;
+    const totalProcessed = sentCount + failedCount;
+    if (totalProcessed >= totalRecipients && updatedCampaign.status === 'sending') {
+      const hasFailures = failedCount > 0;
       const finalStatus = hasFailures ? 'completed_with_errors' : 'completed';
-
-      await Campaign.findByIdAndUpdate(campaignId, {
-        $set: {
-          status: finalStatus,
-          completed_at: new Date(),
-          updated_at: new Date()
-        }
-      });
+      finalUpdate.status = finalStatus;
+      finalUpdate.completed_at = new Date();
 
       if (updatedCampaign.sent_at) {
         const duration = Math.floor((Date.now() - new Date(updatedCampaign.sent_at).getTime()) / 1000);
-        await Campaign.findByIdAndUpdate(campaignId, {
-          $set: {
-            completion_duration_seconds: duration,
-            updated_at: new Date()
-          }
-        });
+        finalUpdate.completion_duration_seconds = duration;
       }
+    }
+
+    if (Object.keys(finalUpdate).length > 0) {
+      finalUpdate.updated_at = new Date();
+      await Campaign.findByIdAndUpdate(campaignId, { $set: finalUpdate });
+      updatedCampaign.status = finalUpdate.status || updatedCampaign.status;
     }
 
     console.log(`Campaign ${campaignId} stats updated for message ${messageId}: ${newStatus}`);

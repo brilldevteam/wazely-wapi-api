@@ -28,6 +28,18 @@ const userSettingSchema = new mongoose.Schema({
     type: Boolean,
     default: true
   },
+  is_snooze_enabled: {
+    type: Boolean,
+    default: false
+  },
+  snooze_time_minutes: {
+    type: Number,
+    default: 10
+  },
+  snooze_count_limit: {
+    type: Number,
+    default: 3
+  },
   theme_color: {
     type: String,
     default: '#128C7E'

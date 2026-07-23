@@ -24,6 +24,10 @@ const automationFlowSchema = new mongoose.Schema({
     type: Boolean,
     default: true
   },
+  is_paused: {
+    type: Boolean,
+    default: false
+  },
   platform: {
     type: String,
     enum: ['whatsapp', 'telegram', 'facebook', 'instagram', 'baileys', 'all'],
@@ -43,6 +47,7 @@ const automationFlowSchema = new mongoose.Schema({
           enum: [
             'trigger',
             'condition',
+            'advanced_condition',
             'action',
             'delay',
             'filter',
@@ -59,14 +64,22 @@ const automationFlowSchema = new mongoose.Schema({
             'assign_chatbot',
             'update_contact',
             'response_saver',
+            'send_google_form',
             'save_to_google_sheet',
             'create_calendar_event',
+            'create_google_meet',
             'appointment_flow',
             'api',
             'wait_for_reply',
             'form_flow',
             'add_to_segment',
-            'custom'
+            'ask_and_wait',
+            'send_sequence',
+            'run_sub_flow',
+            'send_catalog',
+            'send_shopify',
+            'custom',
+            'move_to_pipeline_stage'
           ]
         },
         position: {

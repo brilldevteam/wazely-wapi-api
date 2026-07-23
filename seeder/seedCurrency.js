@@ -24,7 +24,7 @@ async function seedCurrency() {
     for (const currencyData of currencies) {
       await Currency.findOneAndUpdate(
         { code: currencyData.code },
-        currencyData,
+        { $setOnInsert: currencyData },
         { upsert: true, returnDocument: 'after' }
       );
     }

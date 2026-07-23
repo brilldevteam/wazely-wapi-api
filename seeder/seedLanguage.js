@@ -60,22 +60,20 @@ async function seedLanguage() {
         fs.writeFileSync(absolutePath, JSON.stringify(json, null, 2), 'utf8');
       };
 
-      writeFile(frontFile, frontJson);
-      writeFile(adminFile, adminJson);
-      writeFile(appFile, appJson);
+      const existingLanguage = await Language.findOne({ locale: languageData.locale });
+      
+      if (!existingLanguage) {
+        writeFile(frontFile, frontJson);
+        writeFile(adminFile, adminJson);
+        writeFile(appFile, appJson);
 
-      await Language.findOneAndUpdate(
-        { locale: languageData.locale },
-        {
-          $set: {
-            ...languageData,
-            front_translation_file: frontFile,
-            admin_translation_file: adminFile,
-            app_translation_file: appFile
-          }
-        },
-        { upsert: true, returnDocument: 'after' }
-      );
+        await Language.create({
+          ...languageData,
+          front_translation_file: frontFile,
+          admin_translation_file: adminFile,
+          app_translation_file: appFile
+        });
+      }
     }
 
     console.log('Languages seeded successfully!');

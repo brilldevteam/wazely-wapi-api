@@ -192,21 +192,15 @@ export const createAdminTemplate = async (req, res) => {
       const hasCatalogButton = Array.isArray(buttons) &&
         buttons.some((btn) => (btn.type || "").toLowerCase() === "catalog");
       console.log("hasCatalogButton", hasCatalogButton);
-      const hasProductMessage = (msgBody || "").toLowerCase().includes("product") ||
-        (msgBody || "").toLowerCase().includes("catalog");
 
-      if (hasCatalogButton || hasProductMessage) {
+      if (hasCatalogButton) {
         return "catalog";
       }
-
-      const hasCouponCode = (msgBody || "").toLowerCase().includes("coupon") ||
-        (msgBody || "").toLowerCase().includes("code") ||
-        (msgBody || "").toLowerCase().includes("discount");
 
       const hasCopyCodeButton = Array.isArray(buttons) &&
         buttons.some((btn) => (btn.type || "").toLowerCase() === "copy_code");
 
-      if (hasCouponCode || hasCopyCodeButton) {
+      if (hasCopyCodeButton) {
         return "coupon";
       }
 
@@ -774,21 +768,15 @@ export const updateAdminTemplate = async (req, res) => {
       const hasCatalogButton = Array.isArray(buttons) &&
         buttons.some((btn) => (btn.type || "").toLowerCase() === "catalog");
       console.log("hasCatalogButton", hasCatalogButton);
-      const hasProductMessage = (msgBody || "").toLowerCase().includes("product") ||
-        (msgBody || "").toLowerCase().includes("catalog");
 
-      if (hasCatalogButton || hasProductMessage) {
+      if (hasCatalogButton) {
         return "catalog";
       }
-
-      const hasCouponCode = (msgBody || "").toLowerCase().includes("coupon") ||
-        (msgBody || "").toLowerCase().includes("code") ||
-        (msgBody || "").toLowerCase().includes("discount");
 
       const hasCopyCodeButton = Array.isArray(buttons) &&
         buttons.some((btn) => (btn.type || "").toLowerCase() === "copy_code");
 
-      if (hasCouponCode || hasCopyCodeButton) {
+      if (hasCopyCodeButton) {
         return "coupon";
       }
 

@@ -519,6 +519,34 @@ const settingSchema = new mongoose.Schema({
   widget_sms_url: {
     type: String,
     default: ''
+  },
+  is_popup: {
+    type: Boolean,
+    default: false
+  },
+  popup_image_url: {
+    type: String,
+    default: ''
+  },
+  popup_title: {
+    type: String,
+    default: ''
+  },
+  popup_description: {
+    type: String,
+    default: ''
+  },
+  popup_bullets: {
+    type: [String],
+    default: []
+  },
+  popup_button_text: {
+    type: String,
+    default: ''
+  },
+  popup_button_url: {
+    type: String,
+    default: ''
   }
 }, {
   timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },

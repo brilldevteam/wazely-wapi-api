@@ -490,7 +490,18 @@ export const disconnectChannel = async (req, res) => {
             const adAccountIds = adAccounts.map(a => a.ad_account_id);
             if (adAccountIds.length > 0) {
                 const campaigns = await FacebookAdCampaign.find({ ad_account_id: { $in: adAccountIds } });
-                await FacebookAdSet.deleteMany({ campaign_id: { $in: campaignIds } });
+                const campaignIds = campaigns.map(c => c._id);
+                
+                const adSets = await FacebookAdSet.find({ campaign_id: { $in: campaignIds } });
+                const adSetIds = adSets.map(a => a._id);
+                
+                if (adSetIds.length > 0) {
+                    await FacebookAd.deleteMany({ ad_set_id: { $in: adSetIds } });
+                }
+                if (campaignIds.length > 0) {
+                    await FacebookAdSet.deleteMany({ campaign_id: { $in: campaignIds } });
+                }
+                
                 await FacebookAdCampaign.deleteMany({ ad_account_id: { $in: adAccountIds } });
                 await FacebookAdAccount.deleteMany({ connection_id: id });
             }
