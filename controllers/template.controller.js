@@ -332,7 +332,7 @@ export const createTemplate = async (req, res) => {
       templateComponents.push(footerComponent);
     }
 
-    const detectedTemplateType = detectTemplateType(templateComponents, isCarouselTemplate, isAuthenticationCategory);
+    const detectedTemplateType = detectTemplateType(templateComponents, isCarouselTemplate, isAuthenticationCategory, call_permission, is_limited_time_offer);
 
     const createdTemplate = await Template.create({
       user_id: req.user.owner_id,
@@ -1440,7 +1440,7 @@ const extractCarouselCards = (components) => {
 };
 
 
-const detectTemplateType = (components, isCarousel, isAuth) => {
+const detectTemplateType = (components, isCarousel, isAuth, call_permission = false, is_limited_time_offer = false) => {
   if (isCarousel) {
     const cards = extractCarouselCards(components);
     const hasProductHeader = cards.some((card) =>
@@ -1457,13 +1457,18 @@ const detectTemplateType = (components, isCarousel, isAuth) => {
     return "authentication";
   }
 
+  // These flags may arrive as the strings "true"/"false" (e.g. multipart/form-data
+  // requests stringify booleans), so coerce explicitly rather than relying on JS truthiness.
+  const isLimitedTimeOffer = is_limited_time_offer === true || is_limited_time_offer === "true";
+  const isCallPermission = call_permission === true || call_permission === "true";
+
   const ltoComponent = components.find((c) => (c.type || "").toUpperCase() === "LIMITED_TIME_OFFER");
-  if (ltoComponent) {
+  if (isLimitedTimeOffer || ltoComponent) {
     return "limited_time_offer";
   }
 
   const callPermissionComponent = components.find((c) => (c.type || "").toUpperCase() === "CALL_PERMISSION_REQUEST");
-  if (callPermissionComponent) {
+  if (isCallPermission || callPermissionComponent) {
     return "call_permission";
   }
 
@@ -1473,21 +1478,9 @@ const detectTemplateType = (components, isCarousel, isAuth) => {
     c.buttons.some((btn) => (btn.type || "").toUpperCase() === "CATALOG")
   );
 
-  const hasProductMessage = components.some((c) =>
-    (c.type || "").toUpperCase() === "BODY" &&
-    c.text &&
-    (c.text.toLowerCase().includes("product") || c.text.toLowerCase().includes("catalog"))
-  );
-
-  if (hasCatalogButton || hasProductMessage) {
+  if (hasCatalogButton) {
     return "catalog";
   }
-
-  const hasCouponCode = components.some((c) =>
-    (c.type || "").toUpperCase() === "BODY" &&
-    c.text &&
-    (c.text.toLowerCase().includes("coupon") || c.text.toLowerCase().includes("code") || c.text.toLowerCase().includes("discount"))
-  );
 
   const hasCopyCodeButton = components.some((c) =>
     (c.type || "").toUpperCase() === "BUTTONS" &&
@@ -1495,7 +1488,7 @@ const detectTemplateType = (components, isCarousel, isAuth) => {
     c.buttons.some((btn) => (btn.type || "").toUpperCase() === "COPY_CODE")
   );
 
-  if (hasCouponCode || hasCopyCodeButton) {
+  if (hasCopyCodeButton) {
     return "coupon";
   }
 
