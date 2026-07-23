@@ -2042,10 +2042,12 @@ export const updateTemplate = async (req, res) => {
             console.error("Failed to roll back local template after Meta error:", rollbackError.message);
           }
         }
+        const metaErrData = metaError.response?.data?.error;
+        const metaErrorMsg = metaErrData?.error_user_title || metaErrData?.error_user_msg || metaErrData?.message || metaError.message;
         return res.status(400).json({
           success: false,
-          message: metaError.response?.data?.error?.error_user_msg || metaError.message,
-          error: metaError.response?.data?.error?.message || metaError.message,
+          message: metaErrorMsg,
+          error: metaErrorMsg,
           error_details: metaError.response?.data || null,
           local_template_updated: metaUpdateApplied,
           data: await Template.findById(id),
@@ -2074,8 +2076,12 @@ export const updateTemplate = async (req, res) => {
     } else {
       console.error("Error updating template:", error.message || error);
     }
+    const errData = error.response?.data?.error;
+    const errorMsg = errData?.error_user_title || errData?.error_user_msg || errData?.message || error.message;
     return res.status(400).json({
-      error: error.response?.data || error.message,
+      message: errorMsg,
+      error: errorMsg,
+      error_details: error.response?.data || null,
     });
   }
 };
