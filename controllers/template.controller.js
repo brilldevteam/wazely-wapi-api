@@ -2035,6 +2035,32 @@ export const updateTemplate = async (req, res) => {
       } catch (metaError) {
         console.error("Error updating Meta template:", metaError.response?.data || metaError.message);
         console.error("Full error response:", JSON.stringify(metaError.response?.data, null, 2));
+
+        // If Meta says the stored meta_template_id no longer exists on their side (e.g. it was
+        // deleted/recreated outside our app), editing it can never succeed - fall back to
+        // submitting the content as a brand-new template instead of just failing.
+        const staleIdMessage = metaError.response?.data?.error?.message || "";
+        const isStaleTemplateId = !metaUpdateApplied && template.meta_template_id && /does not exist|cannot be loaded/i.test(staleIdMessage);
+
+        if (isStaleTemplateId) {
+          try {
+            const metaPayload = buildMetaTemplatePayload(updatedLocalTemplate);
+            const createResponse = await submitTemplateToMeta(metaPayload, waba.whatsapp_business_account_id, waba.access_token);
+            await Template.findByIdAndUpdate(id, {
+              meta_template_id: createResponse.id || createResponse.name,
+              status: createResponse.status?.toLowerCase(),
+            });
+            return res.status(200).json({
+              success: true,
+              message: "The previous Meta template reference was no longer valid, so a new template was submitted to Meta instead.",
+              data: await Template.findById(id),
+            });
+          } catch (resubmitError) {
+            console.error("Fallback resubmission to Meta also failed:", resubmitError.response?.data || resubmitError.message);
+            metaError = resubmitError;
+          }
+        }
+
         if (!metaUpdateApplied) {
           try {
             await Template.replaceOne({ _id: id }, previousTemplateSnapshot);
