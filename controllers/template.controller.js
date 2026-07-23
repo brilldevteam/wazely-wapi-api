@@ -1522,13 +1522,18 @@ const detectTemplateType = (components, isCarousel, isAuth, call_permission, is_
     return "authentication";
   }
 
+  // These flags may arrive as the strings "true"/"false" (e.g. multipart/form-data
+  // requests stringify booleans), and "false" is truthy in JS, so coerce explicitly.
+  const isLimitedTimeOffer = is_limited_time_offer === true || is_limited_time_offer === "true";
+  const isCallPermission = call_permission === true || call_permission === "true";
+
   const ltoComponent = components.find((c) => (c.type || "").toUpperCase() === "LIMITED_TIME_OFFER");
-  if (is_limited_time_offer || ltoComponent) {
+  if (isLimitedTimeOffer || ltoComponent) {
     return "limited_time_offer";
   }
 
   const callPermissionComponent = components.find((c) => (c.type || "").toUpperCase() === "CALL_PERMISSION_REQUEST");
-  if (call_permission || callPermissionComponent) {
+  if (isCallPermission || callPermissionComponent) {
     return "call_permission";
   }
 
