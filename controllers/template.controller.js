@@ -854,19 +854,83 @@ const updateTemplateComponentsOnMeta = async (metaTemplateId, components, access
   return response.data;
 };
 
+const refreshTemplateMetadataFromMeta = async (template) => {
+  if (
+    template?.platform !== "whatsapp" ||
+    !template?.meta_template_id ||
+    !template?.waba_id
+  ) {
+    return template;
+  }
+
+  try {
+    const waba = await WhatsappWaba.findOne({
+      _id: template.waba_id,
+      user_id: template.user_id,
+      deleted_at: null,
+    }).select("whatsapp_business_account_id access_token");
+
+    if (!waba?.access_token) return template;
+
+    const metaTemplateId = String(template.meta_template_id);
+    let metaTemplate;
+
+    if (/^\d+$/.test(metaTemplateId)) {
+      const response = await axios.get(
+        `https://graph.facebook.com/${UPDATE_API_VERSION}/${metaTemplateId}`,
+        {
+          params: { fields: "id,name,language,status,components" },
+          headers: { Authorization: `Bearer ${waba.access_token}` },
+        }
+      );
+      metaTemplate = response.data;
+    } else {
+      const response = await axios.get(
+        `https://graph.facebook.com/${API_VERSION}/${waba.whatsapp_business_account_id}/message_templates`,
+        {
+          params: {
+            fields: "id,name,language,status,components",
+            name: template.template_name,
+          },
+          headers: { Authorization: `Bearer ${waba.access_token}` },
+        }
+      );
+      const candidates = response.data?.data || [];
+      metaTemplate = candidates.find(
+        (item) => item.name === template.template_name && item.language === template.language
+      ) || candidates.find((item) => item.name === template.template_name);
+    }
+
+    if (!metaTemplate) return template;
+
+    const header = extractHeader(metaTemplate.components || []);
+    if (header) template.header = header;
+    if (metaTemplate.language) template.language = metaTemplate.language;
+    if (metaTemplate.status) template.status = String(metaTemplate.status).toLowerCase();
+    if (metaTemplate.id) template.meta_template_id = metaTemplate.id;
+    await template.save();
+  } catch (error) {
+    console.warn(
+      `Could not refresh template ${template.template_name} from Meta:`,
+      error.response?.data?.error?.message || error.message
+    );
+  }
+
+  return template;
+};
+
 export const getTemplateById = async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.owner_id;
 
-    const template = await Template.findOne({
+    let template = await Template.findOne({
       _id: id,
       user_id: userId,
       is_admin_template: { $ne: true },
       deleted_at: null,
     })
-      .select("-__v")
-      .lean();
+      .select("-__v");
 
     if (!template) {
       return res.status(404).json({
@@ -875,9 +939,11 @@ export const getTemplateById = async (req, res) => {
       });
     }
 
+    template = await refreshTemplateMetadataFromMeta(template);
+
     return res.json({
       success: true,
-      data: template,
+      data: template.toObject(),
     });
   } catch (error) {
     console.error("Error getting template:", error);
@@ -1374,6 +1440,13 @@ const extractHeader = (components) => {
     };
   }
 
+  if (format === "LOCATION") {
+    return {
+      format: "location",
+      media_type: "location",
+    };
+  }
+
   if (["IMAGE", "VIDEO", "DOCUMENT"].includes(format)) {
     const example = headerComponent.example || {};
     const handle = example.header_handle?.[0] || example.header_handle || headerComponent.handle;
@@ -1690,6 +1763,26 @@ export const updateTemplate = async (req, res) => {
       return res.status(404).json({ error: "Template not found" });
     }
 
+    const normalizedTemplateType = (template_type || template.template_type || "standard").toLowerCase();
+    const currentHeaderType = template.header?.format === "media"
+      ? String(template.header.media_type || "media").toLowerCase()
+      : String(template.header?.format || "none").toLowerCase();
+    const requestedHeaderType = ["image", "video", "document", "location"].includes(normalizedTemplateType)
+      ? normalizedTemplateType
+      : (header_text && String(header_text).trim() ? "text" : currentHeaderType);
+
+    if (
+      template.meta_template_id &&
+      ["approved", "pending"].includes(String(template.status || "").toLowerCase()) &&
+      requestedHeaderType !== currentHeaderType
+    ) {
+      return res.status(409).json({
+        success: false,
+        error: "WhatsApp does not allow changing the header type of an approved or pending template. Create a new template with a unique name, select Location, and submit that new template for approval.",
+        message: "WhatsApp does not allow changing the header type of an approved or pending template. Create a new template with a unique name, select Location, and submit that new template for approval.",
+      });
+    }
+
     let waba = null;
     let access_token = null;
     let whatsapp_business_account_id = null;
@@ -1709,8 +1802,6 @@ export const updateTemplate = async (req, res) => {
       whatsapp_business_account_id = waba.whatsapp_business_account_id;
       app_id = waba.app_id;
     }
-    const normalizedTemplateType = (template_type || template.template_type || "standard").toLowerCase();
-
     const updateData = {};
 
     const uploadedFile = req.file || (req.files && req.files.file && req.files.file[0]);
@@ -1884,7 +1975,12 @@ export const updateTemplate = async (req, res) => {
       updateData.authentication_options = authUpdates;
     }
 
-    if (header_text !== undefined && !updateData.header) {
+    if (!updateData.header && normalizedTemplateType === "location") {
+      updateData.header = {
+        format: "location",
+        media_type: "location",
+      };
+    } else if (header_text !== undefined && !updateData.header) {
       const isCurrentlyMedia = template.header && template.header.format === "media";
 
       if (header_text && header_text.trim() !== '') {
@@ -2574,16 +2670,30 @@ export const publishTemplate = async (req, res) => {
           const accessToken = waba.access_token;
           const metaPayload = buildMetaTemplatePayload(template);
 
-          const createResponse = await submitTemplateToMeta(metaPayload, wabaId, accessToken);
+          if (template.meta_template_id) {
+            const updateResponse = await updateTemplateComponentsOnMeta(
+              template.meta_template_id,
+              metaPayload.components || [],
+              accessToken
+            );
 
-          await Template.findByIdAndUpdate(id, {
-            meta_template_id: createResponse.id || createResponse.name,
-            status: createResponse.status?.toLowerCase() || "pending",
-          });
+            await Template.findByIdAndUpdate(id, {
+              status: updateResponse.status?.toLowerCase() || "pending",
+            });
+          } else {
+            const createResponse = await submitTemplateToMeta(metaPayload, wabaId, accessToken);
+
+            await Template.findByIdAndUpdate(id, {
+              meta_template_id: createResponse.id || createResponse.name,
+              status: createResponse.status?.toLowerCase() || "pending",
+            });
+          }
 
           return res.status(200).json({
             success: true,
-            message: "Template published to WhatsApp successfully",
+            message: template.meta_template_id
+              ? "Template changes submitted to WhatsApp successfully"
+              : "Template published to WhatsApp successfully",
           });
         } catch (error) {
           console.error("Error publishing Meta template:", error.response?.data || error.message);

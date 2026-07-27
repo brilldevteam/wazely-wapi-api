@@ -22,15 +22,17 @@ const inferMediaTypeFromUrl = (url) => {
   return null;
 };
 
-const fetchMetaTemplateMediaType = async (template, waba) => {
-  if (!template?.meta_template_id || !waba?.access_token) return null;
+const fetchMetaTemplateMetadata = async (template, waba) => {
+  if (!template?.meta_template_id || !waba?.access_token) {
+    return { headerFormat: null, language: null };
+  }
   const templateId = String(template.meta_template_id);
   let url;
   if (/^\d+$/.test(templateId)) {
-    url = `https://graph.facebook.com/${API_VERSION}/${templateId}?fields=id,name,status,components`;
+    url = `https://graph.facebook.com/${API_VERSION}/${templateId}?fields=id,name,status,language,components`;
   } else {
     const params = new URLSearchParams({
-      fields: 'id,name,status,components',
+      fields: 'id,name,status,language,components',
       name: template.template_name,
     });
     url = `https://graph.facebook.com/${API_VERSION}/${waba.whatsapp_business_account_id}/message_templates?${params}`;
@@ -47,7 +49,10 @@ const fetchMetaTemplateMediaType = async (template, waba) => {
     (component) => String(component.type || '').toUpperCase() === 'HEADER'
   );
   const format = String(header?.format || '').toLowerCase();
-  return ['image', 'video', 'document'].includes(format) ? format : null;
+  return {
+    headerFormat: ['image', 'video', 'document', 'location', 'text'].includes(format) ? format : null,
+    language: metaTemplate?.language || null,
+  };
 };
 
 const DEFAULT_PAGE = 1;
@@ -293,13 +298,29 @@ export const createCampaign = async (req, res) => {
 
     if (platform === 'whatsapp' && template.meta_template_id && selectedWaba) {
       try {
-        const metaMediaType = await fetchMetaTemplateMediaType(template, selectedWaba);
-        if (metaMediaType && (
+        const metaMetadata = await fetchMetaTemplateMetadata(template, selectedWaba);
+        const metaHeaderFormat = metaMetadata.headerFormat;
+        let templateChanged = false;
+
+        if (metaHeaderFormat === 'location' && template.header?.format !== 'location') {
+          template.set('header.format', 'location');
+          template.set('header.media_type', 'location');
+          templateChanged = true;
+        } else if (['image', 'video', 'document'].includes(metaHeaderFormat) && (
           template.header?.format !== 'media' ||
-          String(template.header?.media_type || '').toLowerCase() !== metaMediaType
+          String(template.header?.media_type || '').toLowerCase() !== metaHeaderFormat
         )) {
           template.set('header.format', 'media');
-          template.set('header.media_type', metaMediaType);
+          template.set('header.media_type', metaHeaderFormat);
+          templateChanged = true;
+        }
+
+        if (metaMetadata.language && template.language !== metaMetadata.language) {
+          template.language = metaMetadata.language;
+          templateChanged = true;
+        }
+
+        if (templateChanged) {
           await template.save();
         }
       } catch (error) {
@@ -307,6 +328,23 @@ export const createCampaign = async (req, res) => {
           error: `Could not verify the selected template with Meta: ${error.message}`
         });
       }
+    }
+
+    let resolvedLocationData;
+    try {
+      resolvedLocationData = typeof location_data === 'string'
+        ? JSON.parse(location_data)
+        : (location_data || undefined);
+    } catch {
+      return res.status(400).json({ error: 'Location data must be valid JSON.' });
+    }
+
+    if (template.header?.format === 'location' && (
+      !resolvedLocationData?.latitude || !resolvedLocationData?.longitude
+    )) {
+      return res.status(400).json({
+        error: 'Latitude and Longitude are required for this location-header template.'
+      });
     }
 
     const uploadedFileUrl = req.file || (req.files && req.files['file_url'] ? req.files['file_url'][0] : null);
@@ -625,7 +663,7 @@ export const createCampaign = async (req, res) => {
       media_url: finalMediaUrl,
       original_filename: originalFilename,
       coupon_code: coupon_code || null,
-      location_data: typeof location_data === 'string' ? JSON.parse(location_data) : (location_data || undefined),
+      location_data: resolvedLocationData,
       carousel_products: carouselProducts && Array.isArray(carouselProducts) ? carouselProducts : undefined,
       carousel_cards_data: resolvedCarouselCardsData && Array.isArray(resolvedCarouselCardsData) ? resolvedCarouselCardsData : undefined,
       offer_expiration_minutes: offer_expiration_minutes ?? null,

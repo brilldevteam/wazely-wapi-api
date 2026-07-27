@@ -82,7 +82,30 @@ export default class BaileysProvider extends BaseProvider {
         super();
         this.sockets = new Map();
         this.initializing = new Map();
+        this.retryMessageCache = new Map();
         this.io = null;
+    }
+
+    getRetryMessageKey(wabaId, key) {
+        return `${wabaId}:${key?.remoteJid || ''}:${key?.id || ''}`;
+    }
+
+    getRetryMessage(wabaId, key) {
+        return this.retryMessageCache.get(this.getRetryMessageKey(wabaId, key));
+    }
+
+    cacheRetryMessage(wabaId, message) {
+        if (!message?.key?.id || !message?.message) return;
+
+        this.retryMessageCache.set(
+            this.getRetryMessageKey(wabaId, message.key),
+            message.message
+        );
+
+        while (this.retryMessageCache.size > 5000) {
+            const oldestKey = this.retryMessageCache.keys().next().value;
+            this.retryMessageCache.delete(oldestKey);
+        }
     }
 
     setIO(io) {
@@ -144,7 +167,11 @@ export default class BaileysProvider extends BaseProvider {
                 },
                 logger,
                 getMessage: async (key) => {
-                    return { conversation: 'Hello' };
+                    const cachedMessage = this.getRetryMessage(wabaId, key);
+                    if (!cachedMessage) {
+                        console.warn(`[Baileys] Retry requested for uncached message ${key?.id || 'unknown'}; no fallback content will be invented.`);
+                    }
+                    return cachedMessage;
                 }
             });
 
@@ -1128,6 +1155,7 @@ export default class BaileysProvider extends BaseProvider {
             let bodyParams = [];
             let headerParams = [];
             let buttonParamsList = [];
+            let headerLocation = null;
 
             if (components && Array.isArray(components)) {
                 components.forEach(comp => {
@@ -1145,6 +1173,14 @@ export default class BaileysProvider extends BaseProvider {
                             if (p.type === 'image') return p.image?.link || p.image?.url;
                             if (p.type === 'video') return p.video?.link || p.video?.url;
                             if (p.type === 'document') return p.document?.link || p.document?.url;
+                            if (p.type === 'location' && p.location) {
+                                headerLocation = {
+                                    latitude: Number(p.location.latitude),
+                                    longitude: Number(p.location.longitude),
+                                    name: p.location.name || undefined,
+                                    address: p.location.address || undefined
+                                };
+                            }
                             return '';
                         });
                     } else if (compType === 'button') {
@@ -1391,7 +1427,23 @@ export default class BaileysProvider extends BaseProvider {
                     headerMediaPayload = { url: headerMediaUrl };
                 }
 
-                if (interactiveButtons.length > 0) {
+                if (headerLocation) {
+                    const locationResult = await sock.sendMessage(jid, {
+                        location: {
+                            degreesLatitude: headerLocation.latitude,
+                            degreesLongitude: headerLocation.longitude,
+                            name: headerLocation.name,
+                            address: headerLocation.address
+                        }
+                    }, sendOptions);
+                    this.cacheRetryMessage(wabaId, locationResult);
+
+                    let fullText = bodyText || '';
+                    if (footerText) fullText += `\n\n_${footerText}_`;
+                    result = fullText.trim()
+                        ? await sock.sendMessage(jid, { text: fullText }, sendOptions)
+                        : locationResult;
+                } else if (interactiveButtons.length > 0) {
                     const interactiveMessage = {
                         body: { text: bodyText || ' ' },
                         footer: { text: footerText || ' ' },
@@ -1615,6 +1667,7 @@ export default class BaileysProvider extends BaseProvider {
         }
 
         if (result?.key?.id) {
+            this.cacheRetryMessage(wabaId, result);
             recentlySentMessageIds.add(result.key.id);
             setTimeout(() => recentlySentMessageIds.delete(result.key.id), 5000);
         }
