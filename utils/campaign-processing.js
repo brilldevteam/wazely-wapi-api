@@ -103,6 +103,16 @@ export const processCampaignInBackground = async (campaignOrId) => {
       throw new Error('Template not found');
     }
 
+    const campaignLocation = campaign.location_data;
+    const normalizedLocationData = campaignLocation?.latitude && campaignLocation?.longitude
+      ? {
+          latitude: String(campaignLocation.latitude),
+          longitude: String(campaignLocation.longitude),
+          ...(campaignLocation.name ? { name: String(campaignLocation.name) } : {}),
+          ...(campaignLocation.address ? { address: String(campaignLocation.address) } : {})
+        }
+      : null;
+
     const templateData = {
       template_name: templateName,
       language_code: languageCode,
@@ -112,7 +122,8 @@ export const processCampaignInBackground = async (campaignOrId) => {
       coupon_code: campaign.coupon_code || null,
       carousel_products: campaign.carousel_products && Array.isArray(campaign.carousel_products) ? campaign.carousel_products : null,
       carousel_cards_data: campaign.carousel_cards_data && Array.isArray(campaign.carousel_cards_data) ? campaign.carousel_cards_data : null,
-      location_data: campaign.location_data || null,
+      // Use a plain object so BullMQ always preserves the location subdocument.
+      location_data: normalizedLocationData,
       offer_expiration_minutes: campaign.offer_expiration_minutes ?? null
     };
 

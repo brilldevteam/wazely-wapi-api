@@ -814,7 +814,26 @@ export const processCampaignMessageJob = async (jobData) => {
     console.log('Template variables from job data:', templateData.variables);
     console.log('Template body variables:', template?.body_variables);
 
-    if (templateData.location_data && templateData.location_data.latitude && templateData.location_data.longitude) {
+    const templateHeaderFormat = String(template?.header?.format || '').toLowerCase();
+    const templateHeaderMediaType = String(template?.header?.media_type || '').toLowerCase();
+    const expectsLocationHeader = templateHeaderFormat === 'location' || templateHeaderMediaType === 'location';
+    const hasLocationData = Boolean(
+      templateData.location_data?.latitude && templateData.location_data?.longitude
+    );
+
+    if (expectsLocationHeader && !hasLocationData) {
+      throw new Error(
+        `Location data is missing for location-header template "${templateData.template_name}". Campaign was not sent.`
+      );
+    }
+
+    if (hasLocationData && !expectsLocationHeader) {
+      throw new Error(
+        `Template "${templateData.template_name}" is not a location-header template on the sending server. Sync the template from Meta and create a new campaign.`
+      );
+    }
+
+    if (hasLocationData) {
       templateComponents.push({
         type: 'header',
         parameters: [{

@@ -10,6 +10,9 @@
 
 ## Unreleased
 
+- Fix Location-header campaign delivery for both Meta Business API and Baileys connections, preserving coordinates through queued jobs and rejecting header mismatches before sending.
+- Remove the Baileys hard-coded `Hello` retry fallback, cache the real outbound message for encryption retries, and send Location cards plus campaign body text on linked-device connections.
+- Refresh selected template header and language metadata from Meta and correctly import, update, and publish Location-header templates.
 - Fix template update errors showing a generic "Request failed with status code 400" instead of Meta's actual rejection reason, by using the same robust error-message extraction already used when creating templates.
 - Fix marketing templates being misclassified as Coupon Code or Limited Time Offer (and vice versa) so the Coupon Code / Offer Expiration fields only appear for templates that actually use them.
 - Fix WhatsApp media campaign delivery by generating publicly reachable upload URLs, validating media against Meta's approved header type, and rolling back local template changes when Meta rejects an update.
