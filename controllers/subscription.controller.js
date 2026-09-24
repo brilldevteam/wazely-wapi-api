@@ -659,7 +659,9 @@ const fetchDynamicUsage = async (userId) => {
 
 export const getUserSubscription = async (req, res) => {
     try {
-        const userId = req.user._id;
+        // Agents consume the subscription and limits of the tenant owner who
+        // created them. Their team permissions still control feature access.
+        const userId = req.user.owner_id || req.user._id;
 
         const subscription = await Subscription.findOne({
             user_id: userId,
@@ -1728,7 +1730,7 @@ export const getManagePortalUrl = async (req, res) => {
 
 export const getSubscriptionUsage = async (req, res) => {
     try {
-        const userId = req.user._id;
+        const userId = req.user.owner_id || req.user._id;
 
         const subscription = await Subscription.findOne({
             user_id: userId,

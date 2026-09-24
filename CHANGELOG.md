@@ -10,6 +10,7 @@
 
 ## Unreleased
 
+- Make agents inherit their tenant owner's active subscription, plan limits, and shared usage while continuing to use team permissions for access control.
 - Fix Location-header campaign delivery for both Meta Business API and Baileys connections, preserving coordinates through queued jobs and rejecting header mismatches before sending.
 - Remove the Baileys hard-coded `Hello` retry fallback, cache the real outbound message for encryption retries, and send Location cards plus campaign body text on linked-device connections.
 - Refresh selected template header and language metadata from Meta and correctly import, update, and publish Location-header templates.
