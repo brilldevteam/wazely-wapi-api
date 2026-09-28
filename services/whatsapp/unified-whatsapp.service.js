@@ -1,5 +1,4 @@
 import BusinessAPIProvider from './providers/business-api.provider.js';
-import BaileysProvider from './providers/baileys.provider.js';
 
 import db from '../../models/index.js';
 const {
@@ -25,14 +24,28 @@ class UnifiedWhatsAppService {
   constructor() {
     this.providers = {
       [PROVIDER_TYPES.BUSINESS_API]: new BusinessAPIProvider(),
-      [PROVIDER_TYPES.BAILEY]: new BaileysProvider()
+      [PROVIDER_TYPES.BAILEY]: null
     };
     this.io = null;
   }
 
+  async getProviderInstance(providerType) {
+    if (!Object.values(PROVIDER_TYPES).includes(providerType)) {
+      throw new Error(`Unknown provider type: ${providerType}`);
+    }
+
+    if (!this.providers[providerType] && providerType === PROVIDER_TYPES.BAILEY) {
+      const { default: BaileysProvider } = await import('./providers/baileys.provider.js');
+      const provider = new BaileysProvider();
+      if (this.io) provider.setIO(this.io);
+      this.providers[providerType] = provider;
+    }
+
+    return this.providers[providerType];
+  }
+
   setIO(io) {
     this.io = io;
-    this.providers[PROVIDER_TYPES.BAILEY].setIO(io);
 
     this.io.on('connection', (socket) => {
       socket.on('whatsapp:agent_typing', async (data) => {
@@ -84,7 +97,7 @@ class UnifiedWhatsAppService {
     if (waba) {
       const providerType = waba.provider || PROVIDER_TYPES.BUSINESS_API;
       return {
-        provider: this.providers[providerType],
+        provider: await this.getProviderInstance(providerType),
         type: providerType,
         connection: waba
       };
@@ -122,7 +135,7 @@ class UnifiedWhatsAppService {
 
 
   async getProviderByType(providerType, userId = null, connectionId = null) {
-    if (!this.providers[providerType]) {
+    if (!Object.values(PROVIDER_TYPES).includes(providerType)) {
       throw new Error(`Unknown provider type: ${providerType}`);
     }
 
@@ -165,7 +178,7 @@ class UnifiedWhatsAppService {
     }
 
     return {
-      provider: this.providers[providerType],
+      provider: await this.getProviderInstance(providerType),
       type: providerType,
       connection
     };
@@ -575,7 +588,8 @@ class UnifiedWhatsAppService {
         messageType: messageParams.messageType
       });
 
-      result = await this.providers[providerType].sendMessage(userId, messageParams, connection);
+      const provider = await this.getProviderInstance(providerType);
+      result = await provider.sendMessage(userId, messageParams, connection);
     } else {
       let providerInfo;
       if (providerType) {
@@ -657,7 +671,8 @@ class UnifiedWhatsAppService {
         }
         : waba;
 
-      return await this.providers[type].getMessages(userId, contactNumber, whatsappPhoneNumber, options);
+      const provider = await this.getProviderInstance(type);
+      return await provider.getMessages(userId, contactNumber, whatsappPhoneNumber, options);
     }
 
     let providerInfo;
@@ -689,6 +704,11 @@ class UnifiedWhatsAppService {
   }
 
   async initializeAllConnections() {
+    if (process.env.DISABLE_BAILEYS_PROVIDER === 'true') {
+      console.warn('Baileys provider auto-initialization is disabled for this environment.');
+      return;
+    }
+
     try {
       const connections = await WhatsappWaba.find({
         provider: PROVIDER_TYPES.BAILEY,
@@ -709,7 +729,8 @@ class UnifiedWhatsAppService {
 
         if (hasSessionFiles || conn.connection_status === 'connected') {
           console.log(`Auto-initializing ${conn._id} - status: ${conn.connection_status}, has session: ${hasSessionFiles}`);
-          this.providers[PROVIDER_TYPES.BAILEY].initializeConnection(conn.user_id, conn)
+          const provider = await this.getProviderInstance(PROVIDER_TYPES.BAILEY);
+          provider.initializeConnection(conn.user_id, conn)
             .catch(err => console.error(`Error auto-initializing Baileys for WABA ${conn._id}:`, err));
         } else {
           console.log(`Skipping ${conn._id} - no session files found. Status: ${conn.connection_status}`);
@@ -730,7 +751,8 @@ class UnifiedWhatsAppService {
   async getRecentChats(userId, providerType = null, connectionId = null, connection = null, options = {}) {
     if (connection) {
       const type = connection.provider || (connection.access_token ? PROVIDER_TYPES.BUSINESS_API : PROVIDER_TYPES.BAILEY);
-      return await this.providers[type].getRecentChats(userId, connection, options);
+      const provider = await this.getProviderInstance(type);
+      return await provider.getRecentChats(userId, connection, options);
     }
 
     let providerInfo;
@@ -886,4 +908,3 @@ class UnifiedWhatsAppService {
 
 export { PROVIDER_TYPES };
 export default new UnifiedWhatsAppService();
-
