@@ -1,5 +1,11 @@
 # Changelog
 
+## WAPI v3.3 custom upgrade - 2026-10-03
+
+- Upgrade the API to the WAPI v3.3 vendor release (social media connections and scheduled publishing, Mollie payments, campaign recovery, WhatsApp status sync, campaign batch stats and resume handling).
+- Keep all custom behavior; in campaign creation keep the forwarded-host base URL and `/uploads/campaigns` media links alongside the new v3.3 batch stats, and keep resumed campaigns saving `is_paused = false` before restarting with the new resume option.
+- Add the new v3.3 runtime dependencies (`@mollie/api-client`, `oauth`).
+
 ## WAPI v3.2 custom upgrade - 2026-07-16
 
 - Upgrade the API to the complete WAPI v3.2 vendor release while retaining existing custom behavior.
