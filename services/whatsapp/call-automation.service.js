@@ -1249,7 +1249,7 @@ async executeFunctionWithCollectedParams(functionDef, params, callLog) {
             const localSdp = pc.localDescription.sdp;
 
             const response = await axios.post(
-                `https://graph.facebook.com/v21.0/${phoneNumberId}/calls`,
+                `https://graph.facebook.com/${process.env.WHATSAPP_API_VERSION || 'v21.0'}/${phoneNumberId}/calls`,
                 {
                     messaging_product: 'whatsapp',
                     to: contactNumber,
