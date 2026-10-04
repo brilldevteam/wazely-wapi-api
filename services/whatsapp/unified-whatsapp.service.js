@@ -20,6 +20,8 @@ const PROVIDER_TYPES = {
   BAILEY: 'baileys'
 };
 
+const isPhoneNumberValue = (value) => /^\+?\d+$/.test(String(value || '').replace(/[\s\-()]/g, ''));
+
 class UnifiedWhatsAppService {
   constructor() {
     this.providers = {
@@ -214,7 +216,13 @@ class UnifiedWhatsAppService {
         if (contact.is_unsubscribed && !messageParams.ignoreUnsubscribe) {
           throw new Error('Contact has unsubscribed and cannot receive messages.');
         }
-        recipientNumber = contact.whatsapp_bsuid || contact.whatsapp_username || recipientNumber || contact.phone_number;
+        // Prefer a real phone number: Meta rejects template sends addressed to a business-scoped
+        // user ID (#131000), so the BSUID/username is only used for contacts without a phone.
+        if (!isPhoneNumberValue(recipientNumber)) {
+          recipientNumber = isPhoneNumberValue(contact.phone_number)
+            ? contact.phone_number
+            : contact.whatsapp_bsuid || contact.whatsapp_username || recipientNumber || contact.phone_number;
+        }
       }
     }
 
