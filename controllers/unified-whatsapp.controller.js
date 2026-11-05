@@ -3047,8 +3047,24 @@ export const getRecentChats = async (req, res) => {
       return acc;
     }, {});
 
+    // Contacts created from QR (Baileys) messages may have no phone_number
+    // (keyed by WhatsApp LID), so fall back to the contact id the provider resolved.
+    const contactByIdMap = userContacts.reduce((acc, contact) => {
+      acc[contact._id.toString()] = {
+        id: contact._id.toString(),
+        name: contact.name,
+        chat_status: contact.chat_status || 'open',
+        is_pinned: contact.is_pinned === true,
+        is_snoozed: contact.is_snoozed === true
+      };
+      return acc;
+    }, {});
+    const resolveChatContact = (chat) =>
+      contactMap[chat.contact.number] ||
+      (chat.contact.id ? contactByIdMap[String(chat.contact.id)] : undefined);
+
     const contactIdsInChats = filteredChats
-      .map(c => contactMap[c.contact.number]?.id)
+      .map(c => resolveChatContact(c)?.id)
       .filter(Boolean);
 
     const labelsFromContactTags = contactIdsInChats.length > 0
@@ -3131,7 +3147,7 @@ export const getRecentChats = async (req, res) => {
 
     if (myPhoneNumber) {
       filteredChats = filteredChats.map(chat => {
-        const contactInfo = contactMap[chat.contact.number] || {
+        const contactInfo = resolveChatContact(chat) || {
           id: null,
           name: chat.contact.number,
           is_pinned: false,
@@ -3165,7 +3181,7 @@ export const getRecentChats = async (req, res) => {
       });
     } else {
       filteredChats = filteredChats.map(chat => {
-        const contactInfo = contactMap[chat.contact.number] || {
+        const contactInfo = resolveChatContact(chat) || {
           id: null,
           name: chat.contact.number,
           is_pinned: false,
