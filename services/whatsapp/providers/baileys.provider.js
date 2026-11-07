@@ -1076,7 +1076,14 @@ export default class BaileysProvider extends BaseProvider {
         if (recipientNumber && recipientNumber.length >= 14) {
             jid = `${recipientNumber}@lid`;
         }
-        const contact = await Contact.findOne({ phone_number: recipientNumber, created_by: userId });
+        const contact = await Contact.findOne({
+            created_by: userId,
+            $or: [
+                { phone_number: recipientNumber },
+                { whatsapp_lid: recipientNumber },
+                { 'metadata.whatsapp_lid': recipientNumber }
+            ]
+        });
 
         if (messageTypeInput === 'typing') {
             await sock.sendPresenceUpdate('composing', jid);

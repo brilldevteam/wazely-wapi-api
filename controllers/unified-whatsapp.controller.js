@@ -61,6 +61,10 @@ const getAgentAllowedPhoneNumber = async (agentId, contactPhoneNumber, whatsappP
   return assignment ? phoneNumber : null;
 };
 
+// QR (Baileys) contacts can be known only by their WhatsApp LID, with no phone_number.
+const getWhatsAppIdentifier = (contact) =>
+  contact?.phone_number || contact?.whatsapp_lid || contact?.metadata?.whatsapp_lid || null;
+
 const isAlreadyRegisteredError = (error) => {
   const metaError = error?.response?.data?.error;
   const message = `${metaError?.message || ''} ${metaError?.error_data?.details || ''}`.toLowerCase();
@@ -1524,7 +1528,7 @@ export const getContactProfile = async (req, res) => {
       message_type: { $in: ['image', 'audio', 'video', 'document', 'location'] }
     }).lean();
 
-    const contactIdentifier = contact.phone_number || contact.telegram_chat_id || contact.instagram_scoped_id || contact.facebook_page_scoped_id;
+    const contactIdentifier = getWhatsAppIdentifier(contact) || contact.telegram_chat_id || contact.instagram_scoped_id || contact.facebook_page_scoped_id;
 
     if (allMessages.length === 0 && contactIdentifier && myPhoneNumber) {
       allMessages = await Message.find({
@@ -2076,7 +2080,7 @@ export const getMessages = async (req, res) => {
 
     const messagesResult = await unifiedWhatsAppService.getMessages(
       userId,
-      contact.phone_number,
+      getWhatsAppIdentifier(contact),
       providerType,
       connectionId,
       whatsappPhoneNumber,
@@ -4499,7 +4503,7 @@ const sendMultipleMediaUrls = async (params, res) => {
 
         const messageParams = {
           contactId: contact._id,
-          recipientNumber: contact.phone_number,
+          recipientNumber: getWhatsAppIdentifier(contact),
           messageText: fileCaption,
           messageType: mediaType,
           file,
@@ -4538,7 +4542,7 @@ const sendMultipleMediaUrls = async (params, res) => {
         const fileCaption = messageText || undefined;
 
         const messageParams = {
-          recipientNumber: contact.phone_number,
+          recipientNumber: getWhatsAppIdentifier(contact),
           messageText: fileCaption,
           messageType: mediaType,
           mediaUrl: mediaUrl,
@@ -4940,7 +4944,7 @@ export const clearChat = async (req, res) => {
     if (platform === 'baileys') {
       platform = 'whatsapp';
     }
-    const contactNumber = contact.phone_number || contact.telegram_chat_id || contact.facebook_page_scoped_id || contact.instagram_scoped_id;
+    const contactNumber = getWhatsAppIdentifier(contact) || contact.telegram_chat_id || contact.facebook_page_scoped_id || contact.instagram_scoped_id;
 
     let myPhoneNumber = contactNumber;
     let senderId = null;
