@@ -1910,25 +1910,40 @@ export default class BaileysProvider extends BaseProvider {
         const chatsData = result[0].data;
         const total = result[0].metadata[0]?.total || 0;
 
+        // QR (Baileys) contacts are often keyed by a WhatsApp LID instead of a
+        // phone number (phone_number may be null), so resolve each chat's contact
+        // by the message's contact_id first, then phone_number, then LID.
         const contactNumbers = chatsData.map(c => c._id);
+        const contactIds = chatsData.map(c => c.lastMessage?.contact_id).filter(Boolean);
         const contacts = await Contact.find({
-            phone_number: { $in: contactNumbers },
             created_by: userId,
-            deleted_at: null
-        }).select('phone_number name chat_status is_pinned').lean();
+            deleted_at: null,
+            $or: [
+                { _id: { $in: contactIds } },
+                { phone_number: { $in: contactNumbers } },
+                { 'metadata.whatsapp_lid': { $in: contactNumbers } }
+            ]
+        }).select('phone_number name chat_status is_pinned metadata.whatsapp_lid').lean();
 
-        const contactMap = contacts.reduce((acc, c) => {
-            acc[c.phone_number] = c;
-            return acc;
-        }, {});
+        const contactById = {};
+        const contactByNumber = {};
+        const contactByLid = {};
+        for (const c of contacts) {
+            contactById[c._id.toString()] = c;
+            if (c.phone_number) contactByNumber[c.phone_number] = c;
+            if (c.metadata?.whatsapp_lid) contactByLid[c.metadata.whatsapp_lid] = c;
+        }
 
         const formattedChats = chatsData.map(chat => {
-            const contactInfo = contactMap[chat._id];
+            const lastContactId = chat.lastMessage?.contact_id?.toString();
+            const contactInfo = (lastContactId && contactById[lastContactId])
+                || contactByNumber[chat._id]
+                || contactByLid[chat._id];
             if (!contactInfo) return null;
 
             return {
                 contact: {
-                    id: contactInfo._id || null,
+                    id: contactInfo._id ? contactInfo._id.toString() : null,
                     number: chat._id,
                     name: contactInfo.name || chat._id,
                     avatar: null,
