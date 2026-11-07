@@ -11,6 +11,7 @@ import {
     prepareWAMessageMedia
 } from 'baileys-pro';
 import QRCode from 'qrcode';
+import mongoose from 'mongoose';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -1874,7 +1875,10 @@ export default class BaileysProvider extends BaseProvider {
         const limit = options.limit || 15;
         const skip = (page - 1) * limit;
 
+        // Only this account's messages: the same number may have been connected
+        // by QR in another account before.
         const matchQuery = {
+            user_id: new mongoose.Types.ObjectId(String(userId)),
             $or: [
                 { sender_number: myNumber },
                 { recipient_number: myNumber }

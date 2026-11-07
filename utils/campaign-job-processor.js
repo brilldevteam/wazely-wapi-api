@@ -882,8 +882,9 @@ export const processCampaignMessageJob = async (jobData) => {
           location: {
             latitude: Number(templateData.location_data.latitude),
             longitude: Number(templateData.location_data.longitude),
-            ...(templateData.location_data.name ? { name: templateData.location_data.name } : {}),
-            ...(templateData.location_data.address ? { address: templateData.location_data.address } : {})
+            // Meta rejects location headers without a name and address, so never leave them empty.
+            name: String(templateData.location_data.name || templateData.location_data.address || "Location").trim().slice(0, 1000),
+            address: String(templateData.location_data.address || templateData.location_data.name || `${templateData.location_data.latitude}, ${templateData.location_data.longitude}`).trim().slice(0, 1000)
           }
         }]
       });
