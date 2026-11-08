@@ -379,6 +379,7 @@ class SocialAutomationService {
 
                         if (connectionData.io) {
                             connectionData.io.emit('whatsapp:message', {
+                                user_id: newMessage.user_id?.toString(),
                                 id: newMessage._id.toString(),
                                 wa_message_id: newMessage.platform_message_id || newMessage.wa_message_id || newMessage._id.toString(),
                                 content: newMessage.content,
@@ -484,6 +485,7 @@ class SocialAutomationService {
 
                             if (connectionData.io) {
                                 connectionData.io.emit('whatsapp:message', {
+                                user_id: newMessage.user_id?.toString(),
                                     id: newMessage._id.toString(),
                                     wa_message_id: newMessage.platform_message_id || newMessage.wa_message_id || newMessage._id.toString(),
                                     content: newMessage.content,

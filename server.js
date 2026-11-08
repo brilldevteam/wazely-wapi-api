@@ -19,6 +19,7 @@ import scheduledPostsCronService from './cronjob/scheduled-posts.cronService.js'
 import whatsappStatusSyncCronService from './cronjob/whatsapp-status-sync.cronService.js';
 import { startCampaignRecoveryCron } from './cronjob/campaign-recovery.cronService.js';
 import EmailTemplateService from './services/email-template.service.js';
+import { setupSocketSecurity, joinOwnRooms, canJoinRoom } from './utils/socket-security.js';
 
 async function loadStripeKeysFromSettings() {
   try {
@@ -69,6 +70,9 @@ const io = new Server(httpServer, {
   path: '/socket.io',
 });
 
+// Must run before anything emits: login check + per-business delivery.
+setupSocketSecurity(io);
+
 app.set('io', io);
 setContactImportSocketIo(io);
 
@@ -78,20 +82,17 @@ import('./services/whatsapp/unified-whatsapp.service.js').then(module => {
 
 io.on('connection', (socket) => {
   console.log('WebSocket client connected:', socket.id);
-  const userId = socket.handshake.query?.userId || socket.handshake.auth?.userId;
-  if (userId) {
-    socket.join(`user_${userId}`);
-    socket.join(userId.toString());
-  }
+  // Rooms come from the verified login only, never from an id the client sends.
+  joinOwnRooms(socket);
 
   socket.on('join_room', (room) => {
-    if (room) socket.join(room);
+    if (canJoinRoom(socket, room)) socket.join(String(room));
   });
 
   socket.on('join_user', (uId) => {
-    if (uId) {
+    if (canJoinRoom(socket, uId)) {
       socket.join(`user_${uId}`);
-      socket.join(uId.toString());
+      socket.join(String(uId));
     }
   });
 
