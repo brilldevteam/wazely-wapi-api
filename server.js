@@ -1,4 +1,6 @@
 import 'dotenv/config';
+// Must stay near the top: hides WhatsApp encryption keys that the QR library logs.
+import './utils/redact-signal-logs.js';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import app from './app.js';
