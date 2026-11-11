@@ -113,16 +113,36 @@ export default class BaileysProvider extends BaseProvider {
         this.io = io;
     }
 
+    // Live updates are only delivered to the connection's owner (see utils/socket-security.js),
+    // so every status update needs the owner's user_id. Look it up once per connection.
+    async getWabaOwnerId(wabaId) {
+        if (!wabaId) return null;
+        this.wabaOwners = this.wabaOwners || new Map();
+        const key = String(wabaId);
+        if (this.wabaOwners.has(key)) return this.wabaOwners.get(key);
+        try {
+            const waba = await WhatsappWaba.findById(wabaId).select('user_id').lean();
+            const ownerId = waba?.user_id ? String(waba.user_id) : null;
+            if (ownerId) this.wabaOwners.set(key, ownerId);
+            return ownerId;
+        } catch {
+            return null;
+        }
+    }
+
     emitStatus(wabaId, status, data = {}) {
-        if (this.io) {
+        if (!this.io) return;
+        const send = (ownerId) => {
             this.io.emit('whatsapp:connection:update', {
                 waba_id: wabaId,
                 status: status,
                 timestamp: new Date(),
-                user_id: data.user_id || undefined,
-                ...data
+                ...data,
+                user_id: data.user_id || ownerId || undefined
             });
-        }
+        };
+        if (data.user_id) return send(null);
+        this.getWabaOwnerId(wabaId).then(send).catch(() => send(null));
     }
 
     async initializeConnection(userId, connectionData = null) {
