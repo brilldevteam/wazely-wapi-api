@@ -68,6 +68,38 @@ const crossRate = (rates, fromCode, toCode) => {
     return f > 0 && t > 0 ? t / f : null;
 };
 
+/** Live rate of one currency per 1 USD, or null if the live service doesn't have it. */
+export const getLiveUsdRate = async (code) => {
+    const rates = await getLiveRates();
+    const r = Number(rates?.[String(code || '').toUpperCase()]);
+    return r > 0 ? r : null;
+};
+
+/**
+ * Copy today's live rates into Super Admin -> Currencies, so the stored
+ * (backup) rates stay current without anyone typing them. Runs daily and
+ * whenever a currency is added.
+ */
+export const syncCurrencyTableRates = async () => {
+    const rates = await getLiveRates();
+    if (!rates) return { updated: 0, missing: [], skipped: 'live rates unavailable' };
+    const list = await Currency.find({ deleted_at: null }).select('code exchange_rate').lean();
+    let updated = 0;
+    const missing = [];
+    for (const c of list) {
+        const code = String(c.code || '').toUpperCase();
+        const live = Number(rates[code]);
+        if (!(live > 0)) { missing.push(code); continue; }
+        const rounded = Number(live.toFixed(6));
+        if (Number(c.exchange_rate) !== rounded) {
+            await Currency.updateOne({ _id: c._id }, { $set: { exchange_rate: rounded } });
+            updated++;
+        }
+    }
+    adminRates = null; // use the new numbers straight away
+    return { updated, missing };
+};
+
 export const getExchangeRate = async (from, to) => {
     if (!from || !to) return 1;
 

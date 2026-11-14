@@ -1,6 +1,6 @@
 import { Currency, Setting } from '../models/index.js';
 import mongoose from 'mongoose';
-import { getExchangeRate as getRate } from '../utils/currency.service.js';
+import { getExchangeRate as getRate, getLiveUsdRate, syncCurrencyTableRates } from '../utils/currency.service.js';
 
 const validateCurrencyData = (currencyData) => {
   const errors = [];
@@ -114,6 +114,12 @@ export const createCurrency = async (req, res) => {
   try {
     const currencyData = req.body;
 
+    // The rate is filled in automatically from live rates when left empty.
+    if (currencyData?.code && (currencyData.exchange_rate === undefined || currencyData.exchange_rate === null || currencyData.exchange_rate === "")) {
+      const liveRate = await getLiveUsdRate(currencyData.code);
+      if (liveRate) currencyData.exchange_rate = liveRate;
+    }
+
     const validation = validateCurrencyData(currencyData);
     if (!validation.isValid) {
       return res.status(400).json({
@@ -157,6 +163,9 @@ export const createCurrency = async (req, res) => {
       setting.default_currency = currency._id;
       await setting.save();
     }
+
+    // Replace any typed rate with today's live rate (runs in the background).
+    syncCurrencyTableRates().catch(() => {});
 
     return res.status(201).json({
       success: true,

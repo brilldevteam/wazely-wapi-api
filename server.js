@@ -19,6 +19,7 @@ import snoozeCronService from './cronjob/snooze.cronService.js';
 // import twitterPollCronService from './cronjob/twitter-poll.cronService.js'; // DISABLED: Twitter not working
 import scheduledPostsCronService from './cronjob/scheduled-posts.cronService.js';
 import whatsappStatusSyncCronService from './cronjob/whatsapp-status-sync.cronService.js';
+import currencyRatesCronService from './cronjob/currency-rates.cronService.js';
 import { startCampaignRecoveryCron } from './cronjob/campaign-recovery.cronService.js';
 import EmailTemplateService from './services/email-template.service.js';
 import { setupSocketSecurity, joinOwnRooms, canJoinRoom } from './utils/socket-security.js';
@@ -115,6 +116,7 @@ io.on('connection', (socket) => {
     await snoozeCronService(app);
     await scheduledPostsCronService();
     await whatsappStatusSyncCronService();
+    await currencyRatesCronService();
     startCampaignRecoveryCron();
     // await twitterPollCronService(app); // DISABLED: Twitter not working
     await EmailTemplateService.init();
