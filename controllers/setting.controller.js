@@ -630,8 +630,8 @@ const testMail = async (req, res) => {
     await transporter.sendMail({
       from,
       to: toEmail,
-      subject: 'Test email',
-      html: '<p>This is a test email from your Wapi mail settings. If you received this, your SMTP configuration is working.</p>'
+      subject: 'Wazely CRM test email',
+      html: '<p>This is a test email from your Wazely CRM mail settings. If you received this, your SMTP configuration is working.</p>'
     });
 
     return res.status(200).json({
