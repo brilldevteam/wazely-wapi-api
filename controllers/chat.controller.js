@@ -731,6 +731,18 @@ export const getChatNotes = async (req, res) => {
   }
 };
 
+// The number a chat is stored under. QR (Baileys) contacts can be known only by their
+// WhatsApp LID (no phone_number); their messages and assignments use that LID.
+const getChatIdentifier = (contact) =>
+  contact?.phone_number ||
+  contact?.whatsapp_lid ||
+  contact?.metadata?.whatsapp_lid ||
+  contact?.facebook_page_scoped_id ||
+  contact?.instagram_scoped_id ||
+  contact?.telegram_chat_id ||
+  contact?.twitter_user_id ||
+  null;
+
 export const assignChatToAgent = async (req, res) => {
   try {
     const { contact_id, whatsapp_phone_number_id, agent_id, chatbot_id } = req.body;
@@ -770,7 +782,7 @@ export const assignChatToAgent = async (req, res) => {
       businessPhoneNumber = phoneNumber.display_phone_number;
     }
 
-    const contactPhoneNumber = contact.phone_number || contact.facebook_page_scoped_id || contact.instagram_scoped_id || contact.telegram_chat_id || contact.twitter_user_id;
+    const contactPhoneNumber = getChatIdentifier(contact);
     const sender_number = contactPhoneNumber;
     const receiver_number = businessPhoneNumber;
 
@@ -874,7 +886,7 @@ export const unassignChatFromAgent = async (req, res) => {
       businessPhoneNumber = phoneNumber.display_phone_number;
     }
 
-    const contactPhoneNumber = contact.phone_number || contact.facebook_page_scoped_id || contact.instagram_scoped_id || contact.telegram_chat_id || contact.twitter_user_id;
+    const contactPhoneNumber = getChatIdentifier(contact);
     
     if (!contactPhoneNumber) {
       return res.status(400).json({
@@ -966,12 +978,15 @@ export const updateChatStatus = async (req, res) => {
     contact.chat_status = status;
     await contact.save();
 
-    if (status === 'resolved') {
+    const chatIdentifier = getChatIdentifier(contact);
+    if (!chatIdentifier) {
+      // nothing to update
+    } else if (status === 'resolved') {
       await ChatAssignment.updateMany(
         {
           $or: [
-            { sender_number: contact.phone_number },
-            { receiver_number: contact.phone_number }
+            { sender_number: chatIdentifier },
+            { receiver_number: chatIdentifier }
           ],
           status: 'assigned'
         },
@@ -981,8 +996,8 @@ export const updateChatStatus = async (req, res) => {
       await ChatAssignment.updateMany(
         {
           $or: [
-            { sender_number: contact.phone_number },
-            { receiver_number: contact.phone_number }
+            { sender_number: chatIdentifier },
+            { receiver_number: chatIdentifier }
           ],
           status: 'assigned'
         },

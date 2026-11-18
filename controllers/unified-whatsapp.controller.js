@@ -1216,7 +1216,7 @@ export const sendMessage = async (req, res) => {
       if (!contact) {
         return res.status(404).json({ success: false, error: 'Contact not found' });
       }
-      const allowed = await getAgentAllowedPhoneNumber(req.user.id, contact.phone_number, whatsappPhoneNumberId);
+      const allowed = await getAgentAllowedPhoneNumber(req.user.id, getWhatsAppIdentifier(contact), whatsappPhoneNumberId);
       if (!allowed) {
         return res.status(403).json({
           success: false,
@@ -2055,7 +2055,7 @@ export const getMessages = async (req, res) => {
     }
 
     if (req.user.role === 'agent') {
-      const allowed = await getAgentAllowedPhoneNumber(req.user.id, contact.phone_number, resolvedWhatsappPhoneNumberId);
+      const allowed = await getAgentAllowedPhoneNumber(req.user.id, getWhatsAppIdentifier(contact), resolvedWhatsappPhoneNumberId);
       if (!allowed) {
         return res.status(403).json({
           success: false,
@@ -3333,7 +3333,7 @@ export const getRecentChats = async (req, res) => {
       });
 
       if (agentIdFilter || isAssignedFilter === true) {
-        filteredChats = filteredChats.filter(chat => relevantNumbers.has(chat.contact.number));
+        filteredChats = filteredChats.filter(chat => relevantNumbers.has(chat.contact.phone_number || chat.contact.number));
       } else if (isAssignedFilter === false) {
         const allAssignedNumbers = await ChatAssignment.find({
           whatsapp_phone_number_id: resolvedWhatsappPhoneNumberId,
@@ -3346,7 +3346,7 @@ export const getRecentChats = async (req, res) => {
           });
           return set;
         });
-        filteredChats = filteredChats.filter(chat => !allAssignedNumbers.has(chat.contact.number));
+        filteredChats = filteredChats.filter(chat => !allAssignedNumbers.has(chat.contact.phone_number || chat.contact.number));
       }
     }
 
