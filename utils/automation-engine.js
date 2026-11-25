@@ -8,6 +8,7 @@ import { handleSequenceReply } from './automated-response.service.js';
 import { PROVIDER_TYPES } from '../services/whatsapp/unified-whatsapp.service.js';
 import appointmentService from '../services/appointment.service.js';
 import automationCache from './automation-cache.js';
+import { assignChatToSpecificAgent, autoAssignChat } from './agent-assignment.service.js';
 import { v4 as uuidv4 } from 'uuid';
 
 const safeTrim = (str, maxLength) => {
@@ -4280,7 +4281,6 @@ class AutomationEngine {
       return { success: true, output: inputData };
     }
     const senderNumber = inputData.senderNumber;
-    const recipientNumber = inputData.recipientNumber;
     const whatsappPhoneNumberId = inputData.whatsappPhoneNumberId;
     const userId = inputData.userId || inputData.user_id;
 
@@ -4289,22 +4289,23 @@ class AutomationEngine {
     }
 
     try {
-      await ChatAssignment.findOneAndUpdate(
-        {
-          sender_number: senderNumber,
-          receiver_number: recipientNumber,
-          whatsapp_phone_number_id: whatsappPhoneNumberId
-        },
-        {
-          agent_id,
-          assigned_by: userId,
-          status: 'assigned',
-          is_solved: false
-        },
-        { upsert: true, returnDocument: 'after' }
-      );
+      // Same chat keys as a manual assignment, so the chat shows under Assigned and in the agent's list.
+      const result = await assignChatToSpecificAgent({
+        ownerId: userId,
+        agentId: agent_id,
+        contactId: inputData.contactId,
+        contact: inputData.contact,
+        senderNumber,
+        recipientNumber: inputData.recipientNumber,
+        whatsappPhoneNumberId,
+        source: 'automation'
+      });
 
-      console.log(`[assign_agent] Assigned human agent ${agent_id} to ${senderNumber}`);
+      if (!result.assigned && !result.kept) {
+        return { success: false, output: inputData, error: `Could not assign agent: ${result.reason}` };
+      }
+
+      console.log(`[assign_agent] Assigned human agent ${agent_id} to ${senderNumber}${result.kept ? ' (already assigned)' : ''}`);
       return { success: true, output: { ...inputData, agent_assigned_id: agent_id } };
     } catch (error) {
       console.error(`[assign_agent] Error:`, error);
@@ -4321,76 +4322,42 @@ class AutomationEngine {
       return { success: true, output: inputData };
     }
     const senderNumber = inputData.senderNumber;
-    const recipientNumber = inputData.recipientNumber;
     const whatsappPhoneNumberId = inputData.whatsappPhoneNumberId;
     const userId = inputData.userId || inputData.user_id;
 
     try {
-      const { User, Team } = await import('../models/index.js');
-      let potentialAgents = [];
-      let lastAgentId = null;
-      let trackerUpdated = false;
+      // Keeps the chat with its current agent; otherwise picks the next agent who is
+      // online and Available (round-robin). "All Agents" (no team) includes the owner.
+      const result = await autoAssignChat({
+        ownerId: userId,
+        contactId: inputData.contactId,
+        contact: inputData.contact,
+        senderNumber,
+        recipientNumber: inputData.recipientNumber,
+        whatsappPhoneNumberId,
+        teamId: team_id || null,
+        includeOwner: !team_id,
+        source: 'automation'
+      });
 
-      if (team_id) {
-        const teamDoc = await Team.findById(team_id);
-        if (teamDoc) {
-          lastAgentId = teamDoc.round_robin_last_agent_id;
-          potentialAgents = await User.find({ team_id: team_id, status: true, deleted_at: null })
-            .sort({ created_at: 1 })
-            .lean();
-        }
+      if (result.assigned) {
+        console.log(`[assign_random_agent] Assigned agent ${result.agentId} to ${senderNumber}`);
+      } else if (result.kept) {
+        console.log(`[assign_random_agent] ${senderNumber} kept its current handler (${result.reason})`);
       } else {
-        const ownerDoc = await User.findById(userId);
-        if (ownerDoc) {
-          lastAgentId = ownerDoc.round_robin_last_agent_id;
-          potentialAgents = await User.find({ created_by: userId, status: true, deleted_at: null })
-            .sort({ created_at: 1 })
-            .lean();
+        // Nobody online/available (or chat not found): leave it unassigned and let the flow continue.
+        console.log(`[assign_random_agent] Not assigned for ${senderNumber}: ${result.reason}`);
+      }
 
-          if (ownerDoc.status === true && !ownerDoc.deleted_at) {
-            potentialAgents.unshift(ownerDoc);
-          }
+      return {
+        success: true,
+        output: {
+          ...inputData,
+          agent_assigned_id: result.agentId || null,
+          team_assigned_id: team_id || null,
+          assignment_result: result.assigned ? 'assigned' : result.kept ? 'kept' : result.reason
         }
-      }
-
-      if (!potentialAgents || potentialAgents.length === 0) {
-        return { success: false, output: inputData, error: 'No agents available for round-robin assignment' };
-      }
-
-      let nextIndex = 0;
-      if (lastAgentId) {
-        const lastIndex = potentialAgents.findIndex(a => a._id.toString() === lastAgentId.toString());
-        if (lastIndex !== -1) {
-          nextIndex = (lastIndex + 1) % potentialAgents.length;
-        }
-      }
-
-      const selectedAgent = potentialAgents[nextIndex];
-      const agent_id = selectedAgent._id;
-
-      if (team_id) {
-        await Team.findByIdAndUpdate(team_id, { round_robin_last_agent_id: agent_id });
-      } else {
-        await User.findByIdAndUpdate(userId, { round_robin_last_agent_id: agent_id });
-      }
-
-      await ChatAssignment.findOneAndUpdate(
-        {
-          sender_number: senderNumber,
-          receiver_number: recipientNumber,
-          whatsapp_phone_number_id: whatsappPhoneNumberId
-        },
-        {
-          agent_id,
-          assigned_by: userId,
-          status: 'assigned',
-          is_solved: false
-        },
-        { upsert: true, returnDocument: 'after' }
-      );
-
-      console.log(`[assign_random_agent] Randomly assigned human agent ${agent_id} to ${senderNumber}`);
-      return { success: true, output: { ...inputData, agent_assigned_id: agent_id, team_assigned_id: team_id || null } };
+      };
     } catch (error) {
       console.error(`[assign_random_agent] Error:`, error);
       return { success: false, output: inputData, error: error.message };

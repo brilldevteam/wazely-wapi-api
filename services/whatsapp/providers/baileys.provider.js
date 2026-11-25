@@ -950,10 +950,12 @@ export default class BaileysProvider extends BaseProvider {
                             });
                             automatedHandled = true;
                         }
+                    }
 
-                        if (config?.round_robin_assignment) {
-                            await assignRoundRobin(userId, contact._id, phone?._id);
-                        }
+                    // Every incoming message: a chat with no agent gets the next online, available
+                    // agent; a chat that already has one keeps it.
+                    if (config?.round_robin_assignment) {
+                        await assignRoundRobin(userId, contact._id, phone?._id);
                     }
 
                     if (!automatedHandled && config?.fallback_message?.id) {

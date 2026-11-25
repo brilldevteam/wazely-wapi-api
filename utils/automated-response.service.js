@@ -2,6 +2,7 @@ import db from '../models/index.js';
 import unifiedWhatsAppService from '../services/whatsapp/unified-whatsapp.service.js';
 import { callAIModel } from './ai-utils.js';
 import mongoose from 'mongoose';
+import { assignChatToSpecificAgent, autoAssignChat } from './agent-assignment.service.js';
 
 const {
     WorkingHours,
@@ -921,46 +922,18 @@ export const sendAutomatedReply = async (params) => {
     }
 };
 
+/** A bot reply set to "assign agent": gives the chat to that agent (QR/LID contacts included). */
 const assignToAgentInternal = async ({ contactId, agentId, whatsappPhoneNumberId, adminId }) => {
     try {
-        const contact = await Contact.findById(contactId);
-        const phoneNumber = await WhatsappPhoneNumber.findById(whatsappPhoneNumberId);
-
-        if (!contact || !phoneNumber) {
-            console.error('Contact or WhatsApp phone number not found in assignToAgentInternal');
-            return;
-        }
-
-        const contactPhoneNumber = contact.phone_number;
-        const businessPhoneNumber = phoneNumber.display_phone_number;
-
-        const chatMatch = {
-            $or: [
-                { sender_number: contactPhoneNumber, receiver_number: businessPhoneNumber },
-                { sender_number: businessPhoneNumber, receiver_number: contactPhoneNumber }
-            ]
-        };
-
-        const existingAssignment = await ChatAssignment.findOne({
-            whatsapp_phone_number_id: whatsappPhoneNumberId,
-            ...chatMatch
+        const result = await assignChatToSpecificAgent({
+            ownerId: adminId,
+            agentId,
+            contactId,
+            whatsappPhoneNumberId,
+            source: 'bot'
         });
-
-        if (existingAssignment) {
-            existingAssignment.agent_id = agentId;
-            existingAssignment.status = 'assigned';
-            existingAssignment.assigned_by = adminId;
-            existingAssignment.updated_at = new Date();
-            await existingAssignment.save();
-        } else {
-            await ChatAssignment.create({
-                sender_number: contactPhoneNumber,
-                receiver_number: businessPhoneNumber,
-                whatsapp_phone_number_id: whatsappPhoneNumberId,
-                agent_id: agentId,
-                assigned_by: adminId,
-                status: 'assigned'
-            });
+        if (!result.assigned && !result.kept) {
+            console.error(`assignToAgentInternal: could not assign agent ${agentId} to contact ${contactId}: ${result.reason}`);
         }
     } catch (error) {
         console.error('Error in assignToAgentInternal:', error);
@@ -1022,28 +995,23 @@ export const canSendSequenceStep = async (contactId, materialType) => {
     return true;
 };
 
+/**
+ * WhatsApp "Round robin assignment" setting. Runs for every incoming customer
+ * message: keeps the chat with its current agent, otherwise gives it to the next
+ * agent who is online and Available. Agents only (the owner is not included).
+ */
 export const assignRoundRobin = async (userId, contactId, whatsappPhoneNumberId) => {
     try {
-        console.log("called")
-        const agents = await User.find({ created_by: userId, role: 'agent', status: 'active' }).sort({ _id: 1 });
-        console.log("agents", agents);
-        if (agents.length === 0) return null;
-
-        const lastAssignment = await ChatAssignment.findOne({
-            whatsapp_phone_number_id: whatsappPhoneNumberId
-        }).sort({ createdAt: -1 });
-
-        let nextAgentIndex = 0;
-        if (lastAssignment && lastAssignment.agent_id) {
-            const lastAgentIndex = agents.findIndex(a => a._id.toString() === lastAssignment.agent_id.toString());
-            if (lastAgentIndex !== -1) {
-                nextAgentIndex = (lastAgentIndex + 1) % agents.length;
-            }
-        }
-
-        const selectedAgent = agents[nextAgentIndex];
-        await assignToAgentInternal({ contactId, agentId: selectedAgent._id, whatsappPhoneNumberId, adminId: userId });
-        return selectedAgent;
+        const result = await autoAssignChat({
+            ownerId: userId,
+            contactId,
+            whatsappPhoneNumberId,
+            includeOwner: false,
+            source: 'round_robin'
+        });
+        if (result.assigned) console.log(`[round-robin] Assigned agent ${result.agentId} to contact ${contactId}`);
+        else if (!result.kept) console.log(`[round-robin] Contact ${contactId} left unassigned: ${result.reason}`);
+        return result;
     } catch (error) {
         console.error('Error in assignRoundRobin:', error);
         return null;
@@ -1155,10 +1123,12 @@ export const processAutomatedPipeline = async ({
                     whatsappPhoneNumberId
                 });
                 automatedHandled = true;
+            }
 
-                if (config?.round_robin_assignment) {
-                    await assignRoundRobin(userId, contactDoc._id, whatsappPhoneNumberId);
-                }
+            // Every incoming message: a chat with no agent gets the next online, available
+            // agent; a chat that already has one keeps it.
+            if (config?.round_robin_assignment) {
+                await assignRoundRobin(userId, contactDoc._id, whatsappPhoneNumberId);
             }
 
             if (!automatedHandled && config?.fallback_message?.id && wabaId) {

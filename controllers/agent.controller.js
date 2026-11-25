@@ -1,5 +1,9 @@
 import { User, Team, Role } from '../models/index.js';
 import mongoose from 'mongoose';
+import { isUserOnline } from '../utils/agent-presence.js';
+
+// Never send login secrets to the browser.
+const PRIVATE_USER_FIELDS = '-password -reset_password_token -reset_password_expires';
 import bcrypt from 'bcryptjs';
 import * as funnelService from '../services/funnel.service.js';
 import { sendAccountCredentialsEmail } from '../utils/account-credentials-email.js';
@@ -200,12 +204,20 @@ export const getAllAgents = async (req, res) => {
 
         const totalCount = await User.countDocuments(finalQuery);
 
-        const agents = await User.find(finalQuery)
+        const agentDocs = await User.find(finalQuery)
+            .select(PRIVATE_USER_FIELDS)
             .sort({ [sortField]: sortOrder })
             .skip(skip)
             .limit(limit)
             .populate('team_id', 'name')
             .lean();
+
+        // Live online state (the saved value can lag by the offline grace period).
+        const agents = agentDocs.map((agent) => ({
+            ...agent,
+            is_online: isUserOnline(agent._id),
+            availability_status: agent.availability_status || 'available'
+        }));
 
         return res.status(200).json({
             success: true,
@@ -647,7 +659,7 @@ export const getAgentById = async (req, res) => {
             findQuery.created_by = req.user._id;
         }
 
-        const agent = await User.findOne(findQuery).populate('team_id', 'name').lean();
+        const agent = await User.findOne(findQuery).select(PRIVATE_USER_FIELDS).populate('team_id', 'name').lean();
 
         if (!agent) {
             return res.status(404).json({

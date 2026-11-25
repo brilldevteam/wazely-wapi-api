@@ -77,6 +77,12 @@ const userSchema = new mongoose.Schema({
     type: Date,
     default: null
   },
+  // Set by the user (header switch). 'away' = logged in but must not get new auto-assigned chats.
+  availability_status: {
+    type: String,
+    enum: ['available', 'away'],
+    default: 'available'
+  },
   status: {
     type: Boolean,
     default: true

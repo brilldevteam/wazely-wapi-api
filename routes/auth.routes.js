@@ -26,6 +26,8 @@ router.post('/reset-password-via-token', authController.resetPasswordViaToken);
 router.post('/logout', authenticate, authController.logout);
 router.get('/profile', authenticate, authController.getProfile);
 router.put('/profile', authenticate, authController.updateProfile);
+router.get('/availability', authenticate, authController.getAvailability);
+router.put('/availability', authenticate, authController.updateAvailability);
 router.get('/roles', authController.getPublicRoles);
 router.get('/my-permissions', authenticate, authController.getMyPermissions);
 router.post('/change-password', authenticate, authController.changePassword);

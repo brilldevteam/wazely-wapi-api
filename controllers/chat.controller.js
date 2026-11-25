@@ -1,5 +1,7 @@
 import { Message, ChatNote, User, ChatAssignment, WhatsappConnection, Contact, Tag, WhatsappPhoneNumber, Role, ContactTag } from '../models/index.js';
 import mongoose from 'mongoose';
+import { getChatIdentifier } from '../utils/chat-identifier.js';
+import { emitChatAssigned } from '../utils/agent-assignment.service.js';
 
 const validateWhatsAppConnection = async (userId, preferredIdentifier = null) => {
   let query = {
@@ -731,18 +733,6 @@ export const getChatNotes = async (req, res) => {
   }
 };
 
-// The number a chat is stored under. QR (Baileys) contacts can be known only by their
-// WhatsApp LID (no phone_number); their messages and assignments use that LID.
-const getChatIdentifier = (contact) =>
-  contact?.phone_number ||
-  contact?.whatsapp_lid ||
-  contact?.metadata?.whatsapp_lid ||
-  contact?.facebook_page_scoped_id ||
-  contact?.instagram_scoped_id ||
-  contact?.telegram_chat_id ||
-  contact?.twitter_user_id ||
-  null;
-
 export const assignChatToAgent = async (req, res) => {
   try {
     const { contact_id, whatsapp_phone_number_id, agent_id, chatbot_id } = req.body;
@@ -810,9 +800,15 @@ export const assignChatToAgent = async (req, res) => {
       existingAssignment.agent_id = agent_id;
       existingAssignment.assigned_by = req.user.id;
       existingAssignment.status = 'assigned';
+      // Assigning someone reopens the chat, so auto-assignment won't move it away from them.
+      existingAssignment.is_solved = false;
       existingAssignment.updated_at = new Date();
 
       assignment = await existingAssignment.save();
+
+      if (agent_id) {
+        emitChatAssigned({ ownerId: adminId, agentId: agent_id, contact, whatsappPhoneNumberId: actualPhoneId, source: 'manual' });
+      }
 
       return res.status(200).json({
         success: true,
@@ -829,6 +825,10 @@ export const assignChatToAgent = async (req, res) => {
         whatsapp_phone_number_id: actualPhoneId,
         status: 'assigned'
       });
+    }
+
+    if (agent_id) {
+      emitChatAssigned({ ownerId: adminId, agentId: agent_id, contact, whatsappPhoneNumberId: actualPhoneId, source: 'manual' });
     }
 
     return res.status(201).json({

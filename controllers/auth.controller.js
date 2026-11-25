@@ -7,6 +7,7 @@ import UnifiedWhatsAppService from '../services/whatsapp/unified-whatsapp.servic
 import OTPService from '../services/otp.service.js';
 import { getRedisClient } from '../utils/redis.js';
 import EmailTemplateService from '../services/email-template.service.js';
+import { disconnectSocketsForToken, emitPresence, isUserOnline } from '../utils/agent-presence.js';
 const OTP_LENGTH = 6;
 const OTP_EXPIRATION_MINUTES = 10;
 const DEFAULT_SESSION_EXPIRATION_DAYS = 7;
@@ -845,6 +846,8 @@ export const logout = async (req, res) => {
     }
 
     await Session.findByIdAndDelete(session._id);
+    // Close this login's live connections so the user shows offline straight away.
+    disconnectSocketsForToken(userId, token);
     return res.status(200).json({ message: 'Logged out successfully.' });
   } catch (error) {
     console.error('Error in logout:', error);
@@ -965,6 +968,8 @@ export const getProfile = async (req, res) => {
         note: user.note,
         role: user.role_id?.name || 'user',
         status: user.status,
+        availability_status: user.availability_status || 'available',
+        is_online: isUserOnline(user._id),
         storage_limit: `${user.storage_limit || 0} MB`,
         storage_used: `${parseFloat(((user.storage_used || 0) / (1024 * 1024)).toFixed(2))} MB`
       }
@@ -1414,6 +1419,52 @@ export const verifySignUpOTP = async (req, res) => {
   }
 };
 
+const AVAILABILITY_STATUSES = ['available', 'away'];
+
+/** The logged-in user's own Available / Away switch. */
+export const getAvailability = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('availability_status').lean();
+    return res.status(200).json({
+      success: true,
+      data: {
+        availability_status: user?.availability_status || 'available',
+        is_online: isUserOnline(req.user.id)
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching availability:', error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch availability' });
+  }
+};
+
+export const updateAvailability = async (req, res) => {
+  try {
+    const { availability_status: status } = req.body || {};
+    if (!AVAILABILITY_STATUSES.includes(status)) {
+      return res.status(400).json({ success: false, message: 'availability_status must be "available" or "away"' });
+    }
+
+    await User.updateOne({ _id: req.user.id }, { $set: { availability_status: status } });
+
+    emitPresence({
+      userId: req.user.id,
+      ownerId: req.user.owner_id || req.user.id,
+      isOnline: isUserOnline(req.user.id),
+      availabilityStatus: status
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: status === 'away' ? 'You are now Away. New chats will not be auto-assigned to you.' : 'You are now Available.',
+      data: { availability_status: status, is_online: isUserOnline(req.user.id) }
+    });
+  } catch (error) {
+    console.error('Error updating availability:', error);
+    return res.status(500).json({ success: false, message: 'Failed to update availability' });
+  }
+};
+
 export default {
   register,
   login,
@@ -1430,5 +1481,7 @@ export default {
   resetPasswordViaToken,
   deleteAccount,
   resendSignUpOTP,
-  verifySignUpOTP
+  verifySignUpOTP,
+  getAvailability,
+  updateAvailability
 };

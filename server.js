@@ -23,6 +23,7 @@ import currencyRatesCronService from './cronjob/currency-rates.cronService.js';
 import { startCampaignRecoveryCron } from './cronjob/campaign-recovery.cronService.js';
 import EmailTemplateService from './services/email-template.service.js';
 import { setupSocketSecurity, joinOwnRooms, canJoinRoom } from './utils/socket-security.js';
+import { initAgentPresence, trackSocketConnect, trackSocketDisconnect, resetPresenceOnStartup } from './utils/agent-presence.js';
 
 async function loadStripeKeysFromSettings() {
   try {
@@ -75,6 +76,8 @@ const io = new Server(httpServer, {
 
 // Must run before anything emits: login check + per-business delivery.
 setupSocketSecurity(io);
+// Who is online (used by auto-assignment and the Agents page).
+initAgentPresence(io);
 
 app.set('io', io);
 setContactImportSocketIo(io);
@@ -87,6 +90,7 @@ io.on('connection', (socket) => {
   console.log('WebSocket client connected:', socket.id);
   // Rooms come from the verified login only, never from an id the client sends.
   joinOwnRooms(socket);
+  trackSocketConnect(socket);
 
   socket.on('join_room', (room) => {
     if (canJoinRoom(socket, room)) socket.join(String(room));
@@ -100,13 +104,15 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
- 
+    trackSocketDisconnect(socket);
   });
 });
 
 (async () => {
   try {
     await connectDB();
+    // Nobody is connected before the server starts listening below.
+    await resetPresenceOnStartup();
     await loadStripeKeysFromSettings();
     await loadRazorpayKeysFromSettings();
     await fixSettingsData();
