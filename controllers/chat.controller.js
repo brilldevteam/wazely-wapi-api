@@ -991,14 +991,16 @@ export const updateChatStatus = async (req, res) => {
     }
 
     const chatIdentifier = getChatIdentifier(contact);
+    const myPhoneNumber = phoneNumber ? phoneNumber.display_phone_number : whatsapp_phone_number_id;
     if (!chatIdentifier) {
       // nothing to update
     } else if (status === 'resolved') {
       await ChatAssignment.updateMany(
         {
+          whatsapp_phone_number_id: String(whatsapp_phone_number_id),
           $or: [
-            { sender_number: chatIdentifier },
-            { receiver_number: chatIdentifier }
+            { sender_number: chatIdentifier, receiver_number: myPhoneNumber },
+            { sender_number: myPhoneNumber, receiver_number: chatIdentifier }
           ],
           status: 'assigned'
         },
@@ -1007,9 +1009,10 @@ export const updateChatStatus = async (req, res) => {
     } else {
       await ChatAssignment.updateMany(
         {
+          whatsapp_phone_number_id: String(whatsapp_phone_number_id),
           $or: [
-            { sender_number: chatIdentifier },
-            { receiver_number: chatIdentifier }
+            { sender_number: chatIdentifier, receiver_number: myPhoneNumber },
+            { sender_number: myPhoneNumber, receiver_number: chatIdentifier }
           ],
           status: 'assigned'
         },
@@ -1018,8 +1021,6 @@ export const updateChatStatus = async (req, res) => {
     }
 
     if (status === 'resolved') handOutWaitingChats(userId);
-
-    const myPhoneNumber = phoneNumber ? phoneNumber.display_phone_number : whatsapp_phone_number_id;
 
     const agentName = req.user.name || 'Admin';
 

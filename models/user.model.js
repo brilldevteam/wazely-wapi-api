@@ -48,6 +48,11 @@ const userSchema = new mongoose.Schema({
     ref: 'Team',
     default: null,
   },
+  shift_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'AgentShift',
+    default: null
+  },
   email_verified: {
     type: Boolean,
     default: false

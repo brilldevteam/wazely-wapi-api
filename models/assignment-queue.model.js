@@ -6,8 +6,8 @@ import mongoose from 'mongoose';
  * A chat is added when auto-assignment (the "Sequential assignment" setting or
  * a flow's "Assign Random Agent" step) finds nobody online and available. It is
  * handed out, oldest first, as soon as a matching agent becomes available, and
- * removed when it is assigned, resolved, assigned by hand, or its waiting time
- * (expires_at) runs out — MongoDB deletes expired entries by itself (TTL index).
+ * removed when it is assigned, resolved, assigned by hand, taken by automation,
+ * or its contact is deleted. Waiting entries never expire silently.
  *
  * One entry per chat (owner + business phone + contact).
  */
@@ -23,7 +23,7 @@ const assignmentQueueSchema = new mongoose.Schema({
   source: { type: String, default: 'auto' },
   attempts: { type: Number, default: 0 },
   last_attempt_at: { type: Date, default: null },
-  expires_at: { type: Date, required: true }
+  waiting_reason: { type: String, default: 'no_available_agent' }
 }, {
   timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
   collection: 'assignment_queue'
@@ -32,6 +32,5 @@ const assignmentQueueSchema = new mongoose.Schema({
 assignmentQueueSchema.index({ user_id: 1, whatsapp_phone_number_id: 1, contact_identifier: 1 }, { unique: true });
 assignmentQueueSchema.index({ user_id: 1, created_at: 1 });
 assignmentQueueSchema.index({ contact_id: 1 });
-assignmentQueueSchema.index({ expires_at: 1 }, { expireAfterSeconds: 0 });
 
 export default mongoose.model('AssignmentQueue', assignmentQueueSchema);

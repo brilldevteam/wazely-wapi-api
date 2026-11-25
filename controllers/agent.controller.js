@@ -1,4 +1,5 @@
-import { User, Team, Role } from '../models/index.js';
+import { User, Team, Role, AgentShift } from '../models/index.js';
+import { isInsideShift } from '../utils/agent-shift.js';
 import mongoose from 'mongoose';
 import { isUserOnline } from '../utils/agent-presence.js';
 
@@ -210,13 +211,15 @@ export const getAllAgents = async (req, res) => {
             .skip(skip)
             .limit(limit)
             .populate('team_id', 'name')
+            .populate('shift_id', 'name timezone status monday tuesday wednesday thursday friday saturday sunday deleted_at')
             .lean();
 
         // Live online state (the saved value can lag by the offline grace period).
         const agents = agentDocs.map((agent) => ({
             ...agent,
             is_online: isUserOnline(agent._id),
-            availability_status: agent.availability_status || 'available'
+            availability_status: agent.availability_status || 'available',
+            is_on_shift: isInsideShift(agent.shift_id)
         }));
 
         return res.status(200).json({
@@ -244,7 +247,7 @@ export const getAllAgents = async (req, res) => {
 export const createAgent = async (req, res) => {
     try {
 
-        const { name, email, password, note, country_code, phone, team_id, status, is_phoneno_hide } = req.body;
+        const { name, email, password, note, country_code, phone, team_id, shift_id, status, is_phoneno_hide } = req.body;
         const normalizedEmail = email?.trim().toLowerCase();
         const normalizedPhone = phone?.trim();
         const ownerId = getOwnerId(req.user);
@@ -264,6 +267,7 @@ export const createAgent = async (req, res) => {
         const team = await Team.findOne({
             _id: team_id,
             user_id: ownerId,
+            status: 'active',
             deleted_at: null
         });
 
@@ -272,6 +276,13 @@ export const createAgent = async (req, res) => {
                 success: false,
                 message: 'Team not found'
             });
+        }
+
+        let shift = null;
+        if (shift_id) {
+            if (!mongoose.Types.ObjectId.isValid(shift_id)) return res.status(400).json({ success: false, message: 'Invalid shift' });
+            shift = await AgentShift.findOne({ _id: shift_id, user_id: ownerId, deleted_at: null });
+            if (!shift) return res.status(404).json({ success: false, message: 'Shift not found' });
         }
 
         const role = await Role.findOne({
@@ -308,6 +319,7 @@ export const createAgent = async (req, res) => {
             country_code: country_code,
             phone: normalizedPhone,
             team_id: (team_id && mongoose.Types.ObjectId.isValid(team_id)) ? team_id : null,
+            shift_id: shift?._id || null,
             created_by: ownerId,
             role_id: role._id,
             is_phoneno_hide: is_phoneno_hide,
@@ -347,7 +359,7 @@ export const createAgent = async (req, res) => {
 export const updateAgent = async (req, res) => {
     try {
         const { id } = req.params;
-        const { name, email, note, country_code, phone, team_id, status, is_phoneno_hide, password } = req.body;
+        const { name, email, note, country_code, phone, team_id, shift_id, status, is_phoneno_hide, password } = req.body;
 
         if (!id || !mongoose.Types.ObjectId.isValid(id)) {
             return res.status(400).json({
@@ -385,6 +397,16 @@ export const updateAgent = async (req, res) => {
             });
         }
 
+        const agentOwnerId = existingAgent.created_by || getOwnerId(req.user);
+        const team = await Team.findOne({ _id: team_id, user_id: agentOwnerId, status: 'active', deleted_at: null });
+        if (!team) return res.status(404).json({ success: false, message: 'Active team not found' });
+        let shift = null;
+        if (shift_id) {
+            if (!mongoose.Types.ObjectId.isValid(shift_id)) return res.status(400).json({ success: false, message: 'Invalid shift' });
+            shift = await AgentShift.findOne({ _id: shift_id, user_id: agentOwnerId, deleted_at: null });
+            if (!shift) return res.status(404).json({ success: false, message: 'Shift not found' });
+        }
+
         const validation = validateAgentData({ name, email, note, country_code, phone, status, team_id, password }, true);
         if (!validation.isValid) {
             return res.status(400).json({
@@ -415,7 +437,8 @@ export const updateAgent = async (req, res) => {
         existingAgent.country_code = country_code;
         existingAgent.phone = normalizedPhone;
         existingAgent.is_phoneno_hide = is_phoneno_hide;
-        existingAgent.team_id = (team_id && mongoose.Types.ObjectId.isValid(team_id)) ? team_id : existingAgent.team_id;
+        existingAgent.team_id = team._id;
+        existingAgent.shift_id = shift?._id || null;
         existingAgent.created_by = existingAgent.created_by || req.user._id;
         existingAgent.role_id = role._id;
 
@@ -659,7 +682,7 @@ export const getAgentById = async (req, res) => {
             findQuery.created_by = req.user._id;
         }
 
-        const agent = await User.findOne(findQuery).select(PRIVATE_USER_FIELDS).populate('team_id', 'name').lean();
+        const agent = await User.findOne(findQuery).select(PRIVATE_USER_FIELDS).populate('team_id', 'name').populate('shift_id').lean();
 
         if (!agent) {
             return res.status(404).json({

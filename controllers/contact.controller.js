@@ -2,6 +2,7 @@ import { Contact, CustomField, User, Tag, ImportJob, Role } from '../models/inde
 import mongoose from 'mongoose';
 import * as segmentService from '../services/segment.service.js';
 import * as funnelService from '../services/funnel.service.js';
+import { removeChatFromQueue } from '../utils/agent-assignment.service.js';
 
 import { getContactExportQueue } from '../queues/contact-export-queue.js';
 import { getContactImportQueue } from '../queues/contact-import-queue.js';
@@ -739,6 +740,7 @@ export const deleteContact = async (req, res) => {
     }
 
     await Contact.deleteOne({ _id: id });
+    await removeChatFromQueue({ ownerId: req.user.owner_id, contactId: id });
 
     await segmentService.removeContactFromAllSegments(id, req.user.owner_id);
 
@@ -818,6 +820,7 @@ export const bulkDeleteContacts = async (req, res) => {
     const result = await Contact.deleteMany(
       { _id: { $in: foundIds } }
     );
+    await Promise.all(foundIds.map((contactId) => removeChatFromQueue({ ownerId: req.user.owner_id, contactId })));
 
     await segmentService.removeContactFromAllSegments(foundIds, req.user.owner_id);
 

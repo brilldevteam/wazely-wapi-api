@@ -8,7 +8,7 @@ import { handleSequenceReply } from './automated-response.service.js';
 import { PROVIDER_TYPES } from '../services/whatsapp/unified-whatsapp.service.js';
 import appointmentService from '../services/appointment.service.js';
 import automationCache from './automation-cache.js';
-import { assignChatToSpecificAgent, autoAssignChat } from './agent-assignment.service.js';
+import { assignChatToSpecificAgent, autoAssignChat, removeChatFromQueue } from './agent-assignment.service.js';
 import { v4 as uuidv4 } from 'uuid';
 
 const safeTrim = (str, maxLength) => {
@@ -4314,7 +4314,7 @@ class AutomationEngine {
   }
 
   async executeAssignRandomAgentNode(node, inputData) {
-    const { team_id } = node.parameters || {};
+    const { team_id, include_owner = false } = node.parameters || {};
 
     if (inputData.is_test) {
       inputData.test_responses = inputData.test_responses || [];
@@ -4336,7 +4336,7 @@ class AutomationEngine {
         recipientNumber: inputData.recipientNumber,
         whatsappPhoneNumberId,
         teamId: team_id || null,
-        includeOwner: !team_id,
+        includeOwner: !team_id && include_owner === true,
         source: 'automation'
       });
 
@@ -4667,6 +4667,7 @@ class AutomationEngine {
       }
 
       await contact.save();
+      await removeChatFromQueue({ ownerId: userId, contactId: contact._id, whatsappPhoneNumberId: inputData.whatsappPhoneNumberId || null });
 
       console.log(`[assign_chatbot] Assigned chatbot ${chatbot_id} to ${senderNumber} with overrides:`, overrides);
       return { success: true, output: { ...inputData, chatbot_assigned_id: chatbot_id } };

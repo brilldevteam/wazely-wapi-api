@@ -22,6 +22,7 @@ import whatsappStatusSyncCronService from './cronjob/whatsapp-status-sync.cronSe
 import currencyRatesCronService from './cronjob/currency-rates.cronService.js';
 import assignmentQueueCronService from './cronjob/assignment-queue.cronService.js';
 import { processAssignmentQueue } from './utils/agent-assignment.service.js';
+import { AssignmentQueue } from './models/index.js';
 import { startCampaignRecoveryCron } from './cronjob/campaign-recovery.cronService.js';
 import EmailTemplateService from './services/email-template.service.js';
 import { setupSocketSecurity, joinOwnRooms, canJoinRoom } from './utils/socket-security.js';
@@ -121,6 +122,13 @@ io.on('connection', (socket) => {
 (async () => {
   try {
     await connectDB();
+    try {
+      await AssignmentQueue.collection.dropIndex('expires_at_1');
+      console.log('[assignment-queue] Removed legacy expiry index; waiting chats are now persistent');
+    } catch (error) {
+      if (error?.codeName !== 'IndexNotFound' && error?.code !== 27) console.warn('[assignment-queue] Could not remove legacy expiry index:', error.message);
+    }
+    await AssignmentQueue.updateMany({ expires_at: { $exists: true } }, { $unset: { expires_at: '' } });
     // Nobody is connected before the server starts listening below.
     await resetPresenceOnStartup();
     await loadStripeKeysFromSettings();

@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { User, Team, Role, ChatAssignment, Contact, WhatsappPhoneNumber, WabaConfiguration, AssignmentQueue } from '../models/index.js';
 import { getChatIdentifier } from './chat-identifier.js';
 import { getIO, isUserOnline } from './agent-presence.js';
+import { isInsideShift } from './agent-shift.js';
 
 /**
  * Automatic chat assignment, shared by the automation "Assign Random Agent" step
@@ -28,7 +29,7 @@ import { getIO, isUserOnline } from './agent-presence.js';
 export const CHAT_ASSIGNED_EVENT = 'chat:assigned';
 export const QUEUE_UPDATED_EVENT = 'chat:queue-updated';
 
-export const DEFAULT_ASSIGNMENT_SETTINGS = Object.freeze({ queueEnabled: true, waitHours: 6, maxOpenChats: 0 });
+export const DEFAULT_ASSIGNMENT_SETTINGS = Object.freeze({ maxOpenChats: 0, strategy: 'round_robin' });
 const WAITING_REASONS = ['no_available_agent', 'agents_at_limit'];
 const QUEUE_BATCH_SIZE = 500;
 
@@ -36,7 +37,7 @@ const isActiveUser = (user) => !!user && user.status === true && !user.deleted_a
 
 /** Can take a new chat right now: active, online and not set to Away. */
 export const isAgentAvailable = (user) =>
-  isActiveUser(user) && user.availability_status !== 'away' && isUserOnline(user._id);
+  isActiveUser(user) && user.availability_status !== 'away' && isInsideShift(user.shift_id) && isUserOnline(user._id);
 
 /**
  * Next user after `lastAgentId` (in the fixed `candidates` order) who is available
@@ -98,8 +99,7 @@ export const getAssignmentSettings = async (whatsappPhoneNumberId) => {
   if (!config) return { ...DEFAULT_ASSIGNMENT_SETTINGS };
 
   return {
-    queueEnabled: config.assignment_queue_enabled !== false,
-    waitHours: clampInt(config.assignment_wait_hours, 1, 168, DEFAULT_ASSIGNMENT_SETTINGS.waitHours),
+    strategy: config.assignment_strategy === 'least_open' ? 'least_open' : 'round_robin',
     maxOpenChats: clampInt(config.max_open_chats_per_agent, 0, 1000, 0)
   };
 };
@@ -192,20 +192,23 @@ const findCurrentHandler = async (chatMatch, contact = null) => {
 };
 
 const loadCandidates = async ({ ownerId, teamId, includeOwner }) => {
-  const fields = 'name status deleted_at availability_status created_at round_robin_last_agent_id';
+  const fields = 'name status deleted_at availability_status created_at round_robin_last_agent_id shift_id role_id created_by';
 
   if (teamId) {
     if (!mongoose.Types.ObjectId.isValid(String(teamId))) return { candidates: [], tracker: null };
-    const team = await Team.findOne({ _id: teamId, deleted_at: null }).lean();
+    const team = await Team.findOne({ _id: teamId, user_id: ownerId, status: 'active', deleted_at: null }).lean();
     if (!team) return { candidates: [], tracker: null };
-    const candidates = await User.find({ team_id: teamId, status: true, deleted_at: null })
+    const agentRole = await Role.findOne({ name: 'agent' }).select('_id').lean();
+    if (!agentRole) return { candidates: [], tracker: null };
+    const candidates = await User.find({ team_id: teamId, created_by: ownerId, role_id: agentRole._id, status: true, deleted_at: null })
       .select(fields)
       .sort({ created_at: 1, _id: 1 })
+      .populate('shift_id')
       .lean();
     return { candidates, tracker: { model: Team, id: team._id, lastAgentId: team.round_robin_last_agent_id } };
   }
 
-  const owner = await User.findById(ownerId).select(fields).lean();
+  const owner = await User.findById(ownerId).select(fields).populate('shift_id').lean();
   if (!owner) return { candidates: [], tracker: null };
 
   const agentRole = await Role.findOne({ name: 'agent' }).select('_id').lean();
@@ -213,6 +216,7 @@ const loadCandidates = async ({ ownerId, teamId, includeOwner }) => {
     ? await User.find({ created_by: ownerId, role_id: agentRole._id, status: true, deleted_at: null })
         .select(fields)
         .sort({ created_at: 1, _id: 1 })
+        .populate('shift_id')
         .lean()
     : [];
 
@@ -265,7 +269,7 @@ const queueKeyFilter = (ownerId, keys) => ({
   contact_identifier: keys.contactIdentifier
 });
 
-const enqueueChat = async ({ ownerId, keys, teamId, includeOwner, source, waitHours }) => {
+const enqueueChat = async ({ ownerId, keys, teamId, includeOwner, source, reason }) => {
   try {
     const result = await AssignmentQueue.updateOne(
       queueKeyFilter(ownerId, keys),
@@ -276,9 +280,9 @@ const enqueueChat = async ({ ownerId, keys, teamId, includeOwner, source, waitHo
           business_number: keys.businessNumber,
           team_id: teamId || null,
           include_owner: !!includeOwner,
-          source
-        },
-        $setOnInsert: { expires_at: new Date(Date.now() + waitHours * 60 * 60 * 1000) }
+          source,
+          waiting_reason: reason
+        }
       },
       { upsert: true }
     );
@@ -312,7 +316,7 @@ export const removeChatFromQueue = async ({ ownerId, contactId, whatsappPhoneNum
 export const getWaitingSinceByContact = async (ownerId, contactIds) => {
   const ids = (contactIds || []).filter((id) => id && mongoose.Types.ObjectId.isValid(String(id)));
   if (!ownerId || !ids.length) return new Map();
-  const entries = await AssignmentQueue.find({ user_id: ownerId, contact_id: { $in: ids }, expires_at: { $gt: new Date() } })
+  const entries = await AssignmentQueue.find({ user_id: ownerId, contact_id: { $in: ids } })
     .select('contact_id created_at')
     .lean();
   return new Map(entries.map((e) => [String(e.contact_id), e.created_at]));
@@ -381,20 +385,26 @@ const assignChatCore = async ({
   const { candidates, tracker } = await loadCandidates({ ownerId, teamId, includeOwner });
   if (!candidates.length) return { assigned: false, agentId: null, reason: 'no_agents' };
 
-  const openCounts = settings.maxOpenChats > 0 ? await countOpenChats(candidates.map((c) => c._id)) : null;
-  const { agent, atLimit } = pickNextAvailableAgent(candidates, tracker?.lastAgentId, { openCounts, maxOpenChats: settings.maxOpenChats });
+  const openCounts = settings.maxOpenChats > 0 || settings.strategy === 'least_open' ? await countOpenChats(candidates.map((c) => c._id)) : null;
+  let selection = pickNextAvailableAgent(candidates, tracker?.lastAgentId, { openCounts, maxOpenChats: settings.maxOpenChats });
+  if (settings.strategy === 'least_open' && selection.agent) {
+    const eligible = candidates.filter((candidate) => isAgentAvailable(candidate) && (settings.maxOpenChats === 0 || (openCounts?.get(String(candidate._id)) || 0) < settings.maxOpenChats));
+    const lowest = Math.min(...eligible.map((candidate) => openCounts?.get(String(candidate._id)) || 0));
+    const tied = eligible.filter((candidate) => (openCounts?.get(String(candidate._id)) || 0) === lowest);
+    selection = pickNextAvailableAgent(tied, tracker?.lastAgentId, { openCounts, maxOpenChats: settings.maxOpenChats });
+  }
+  const { agent, atLimit } = selection;
 
   if (!agent) {
     const reason = atLimit ? 'agents_at_limit' : 'no_available_agent';
-    const queued = allowQueue && settings.queueEnabled
-      ? await enqueueChat({ ownerId, keys, teamId, includeOwner, source, waitHours: settings.waitHours })
+    const queued = allowQueue
+      ? await enqueueChat({ ownerId, keys, teamId, includeOwner, source, reason })
       : false;
     return { assigned: false, agentId: null, reason, queued };
   }
 
-  if (tracker) await tracker.model.updateOne({ _id: tracker.id }, { $set: { round_robin_last_agent_id: agent._id } });
-
   await writeAssignment({ keys, agentId: agent._id, ownerId });
+  if (tracker) await tracker.model.updateOne({ _id: tracker.id }, { $set: { round_robin_last_agent_id: agent._id } });
   await dequeueChat(ownerId, keys);
   emitChatAssigned({ ownerId, agentId: agent._id, contact: keys.contact, whatsappPhoneNumberId: keys.phoneId, source });
 
@@ -414,7 +424,7 @@ export const autoAssignChat = (params) => {
 
 /** Hands out one business's waiting chats, oldest first. Caller holds the owner lock. */
 const drainOwnerQueue = async (ownerId) => {
-  const entries = await AssignmentQueue.find({ user_id: ownerId, expires_at: { $gt: new Date() } })
+  const entries = await AssignmentQueue.find({ user_id: ownerId })
     .sort({ created_at: 1, _id: 1 })
     .limit(QUEUE_BATCH_SIZE)
     .lean();
@@ -470,7 +480,7 @@ const drainOwnerQueue = async (ownerId) => {
 export const processAssignmentQueue = async ({ ownerId = null } = {}) => {
   const owners = ownerId
     ? [String(ownerId)]
-    : (await AssignmentQueue.distinct('user_id', { expires_at: { $gt: new Date() } })).map(String);
+    : (await AssignmentQueue.distinct('user_id')).map(String);
 
   let assigned = 0;
   for (const owner of owners) {

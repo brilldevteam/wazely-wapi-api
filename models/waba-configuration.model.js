@@ -69,6 +69,11 @@ const wabaConfigurationSchema = new mongoose.Schema({
         type: Boolean,
         default: false
     },
+    assignment_strategy: {
+        type: String,
+        enum: ['round_robin', 'least_open'],
+        default: 'round_robin'
+    },
     // Auto-assignment rules (used by Sequential assignment and flow "Assign Random Agent" steps).
     // When nobody is available, keep the chat waiting and hand it out when an agent becomes available.
     assignment_queue_enabled: {

@@ -36,6 +36,7 @@ import AIModel from './ai-model.model.js';
 import WhatsappConnection from './whatsapp-connections.model.js';
 import WhatsappWaba from './whatsapp-waba.model.js';
 import Team from './team.model.js';
+import AgentShift from './agent-shift.model.js';
 import Permission from './permission.model.js';
 import TeamPermission from './teamPer.model.js';
 import WhatsappPhoneNumber from './whatsapp-phone-number.model.js';
@@ -134,6 +135,7 @@ const db = {
   WhatsappConnection,
   WhatsappWaba,
   Team,
+  AgentShift,
   Permission,
   TeamPermission,
   WhatsappPhoneNumber,
@@ -228,6 +230,7 @@ export {
   User, OTPLog, Session, Setting, Faq, ContactInquiry, Testimonial, Message, ContactTag, ChatNote, WhatsappConnection,
   WhatsappWaba,
   Team,
+  AgentShift,
   Permission,
   TeamPermission,
   AiPromptLog,

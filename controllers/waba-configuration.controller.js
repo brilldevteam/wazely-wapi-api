@@ -142,18 +142,12 @@ export const updateWabaConfiguration = async (req, res) => {
         if (updateData.round_robin_assignment !== undefined) {
             config.round_robin_assignment = updateData.round_robin_assignment;
         }
+        if (updateData.assignment_strategy !== undefined) {
+            if (!['round_robin', 'least_open'].includes(updateData.assignment_strategy)) return res.status(400).json({ success: false, message: 'Invalid assignment strategy' });
+            config.assignment_strategy = updateData.assignment_strategy;
+        }
 
         // Auto-assignment rules
-        if (updateData.assignment_queue_enabled !== undefined) {
-            config.assignment_queue_enabled = updateData.assignment_queue_enabled === true || updateData.assignment_queue_enabled === 'true';
-        }
-        if (updateData.assignment_wait_hours !== undefined) {
-            const hours = Number(updateData.assignment_wait_hours);
-            if (!Number.isInteger(hours) || hours < 1 || hours > 168) {
-                return res.status(400).json({ success: false, message: 'Waiting time must be a whole number of hours between 1 and 168 (7 days)' });
-            }
-            config.assignment_wait_hours = hours;
-        }
         if (updateData.max_open_chats_per_agent !== undefined) {
             const max = updateData.max_open_chats_per_agent === null ? 0 : Number(updateData.max_open_chats_per_agent);
             if (!Number.isInteger(max) || max < 0 || max > 1000) {
@@ -165,7 +159,7 @@ export const updateWabaConfiguration = async (req, res) => {
         await config.save();
 
         // Rules may now allow waiting chats to be handed out (e.g. a higher limit).
-        if (['round_robin_assignment', 'assignment_queue_enabled', 'max_open_chats_per_agent'].some((k) => updateData[k] !== undefined) && req.user?.owner_id) {
+        if (['round_robin_assignment', 'assignment_strategy', 'max_open_chats_per_agent'].some((k) => updateData[k] !== undefined) && req.user?.owner_id) {
             processAssignmentQueue({ ownerId: req.user.owner_id }).catch((error) => console.error('[assignment-queue] Hand-out after settings change failed:', error.message));
         }
 
