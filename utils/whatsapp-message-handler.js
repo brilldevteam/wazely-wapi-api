@@ -7,6 +7,8 @@ import AWSStorage from './aws-storage.js';
 import ffmpegPath from 'ffmpeg-static';
 import { execFile } from 'child_process';
 const writeFile = promisify(fs.writeFile);
+const WHATSAPP_API_VERSION = process.env.WHATSAPP_API_VERSION || 'v19.0';
+
 
 
 export function parseIncomingMessage(message) {
@@ -101,6 +103,12 @@ export function parseIncomingMessage(message) {
       console.log("content", content)
       break;
 
+    case "button":
+      content = message.button?.text || null;
+      interactiveId = message.button?.payload || null;
+      fileType = "button_reply";
+      break;
+
     case "reaction":
       reactionMessageId = message.reaction.message_id;
       reactionEmoji = message.reaction.emoji;
@@ -115,6 +123,14 @@ export function parseIncomingMessage(message) {
   let interactiveData = null;
   if (message.type === "interactive") {
     interactiveData = message.interactive;
+  } else if (message.type === "button") {
+    interactiveData = {
+      type: "button_reply",
+      button_reply: {
+        id: message.button?.payload || "",
+        title: message.button?.text || ""
+      }
+    };
   }
 
   return { content, mediaId, fileType, mimeType, interactiveId, interactiveData, replyMessageId, reactionMessageId, reactionEmoji };
@@ -123,7 +139,7 @@ export function parseIncomingMessage(message) {
 
 export async function getWhatsAppMediaUrl(mediaId, access_token) {
   const res = await axios.get(
-    `https://graph.facebook.com/v19.0/${mediaId}`,
+    `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${mediaId}`,
     {
       headers: { Authorization: `Bearer ${access_token}` }
     }

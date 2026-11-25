@@ -1,6 +1,6 @@
 import { Currency, Setting } from '../models/index.js';
 import mongoose from 'mongoose';
-import { getExchangeRate as getRate } from '../utils/currency.service.js';
+import { getExchangeRate as getRate, getLiveUsdRate, syncCurrencyTableRates } from '../utils/currency.service.js';
 
 const validateCurrencyData = (currencyData) => {
   const errors = [];
@@ -114,6 +114,12 @@ export const createCurrency = async (req, res) => {
   try {
     const currencyData = req.body;
 
+    // The rate is filled in automatically from live rates when left empty.
+    if (currencyData?.code && (currencyData.exchange_rate === undefined || currencyData.exchange_rate === null || currencyData.exchange_rate === "")) {
+      const liveRate = await getLiveUsdRate(currencyData.code);
+      if (liveRate) currencyData.exchange_rate = liveRate;
+    }
+
     const validation = validateCurrencyData(currencyData);
     if (!validation.isValid) {
       return res.status(400).json({
@@ -137,7 +143,12 @@ export const createCurrency = async (req, res) => {
       await Currency.updateMany({ deleted_at: null }, { $set: { is_default: false } });
     }
 
+    // New currencies go to the end of the dropdown (the default position 0 put them first).
+    const last = await Currency.findOne({ deleted_at: null }).sort({ sort_order: -1 }).select('sort_order').lean();
+    const nextSortOrder = (Number(last?.sort_order) || 0) + 1;
+
     const currency = await Currency.create({
+      sort_order: nextSortOrder,
       name: currencyData.name.trim(),
       code: currencyCode,
       symbol: currencyData.symbol.trim(),
@@ -157,6 +168,9 @@ export const createCurrency = async (req, res) => {
       setting.default_currency = currency._id;
       await setting.save();
     }
+
+    // Replace any typed rate with today's live rate (runs in the background).
+    syncCurrencyTableRates().catch(() => {});
 
     return res.status(201).json({
       success: true,
@@ -314,6 +328,7 @@ export const updateCurrency = async (req, res) => {
     if (updateData.symbol !== undefined) currency.symbol = updateData.symbol.trim();
     if (updateData.exchange_rate !== undefined) currency.exchange_rate = updateData.exchange_rate;
     if (updateData.decimal_number !== undefined) currency.decimal_number = updateData.decimal_number;
+    if (updateData.sort_order !== undefined && !isNaN(Number(updateData.sort_order))) currency.sort_order = Number(updateData.sort_order);
     if (updateData.is_active !== undefined) {
       if (currency.is_default && updateData.is_active === false) {
         return res.status(400).json({

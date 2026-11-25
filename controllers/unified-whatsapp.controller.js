@@ -1,4 +1,7 @@
 import unifiedWhatsAppService, { PROVIDER_TYPES } from '../services/whatsapp/unified-whatsapp.service.js';
+import businessApiProvider from '../services/whatsapp/providers/business-api.provider.js';
+import { syncWabaAndPhoneStatus } from '../services/whatsapp-status-monitor.service.js';
+import { getWhatsAppTypeFromMime } from '../utils/uploadMediaToWhatsapp.js';
 import { Message, ContactTag, ChatNote, WhatsappWaba, WhatsappPhoneNumber, Contact, Tag, ChatAssignment, User, TelegramConnection, InstagramConnection, FacebookConnection, TwitterConnection, FacebookPage, Template, Submission } from '../models/index.js';
 import { uploadSingle } from '../utils/upload.js';
 import { Setting } from '../models/index.js';
@@ -14,7 +17,7 @@ const processedAuthCodes = new Set();
 const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 30;
 const MAX_LIMIT = 100;
-const META_GRAPH_API_VERSION = 'v25.0';
+const META_GRAPH_API_VERSION = process.env.WHATSAPP_API_VERSION || 'v25.0';
 
 const extractPhoneNumber = (userId) => {
   return userId.split(':')[0].replace(WHATSAPP_JID_SUFFIX, '');
@@ -57,6 +60,10 @@ const getAgentAllowedPhoneNumber = async (agentId, contactPhoneNumber, whatsappP
   }
   return assignment ? phoneNumber : null;
 };
+
+// QR (Baileys) contacts can be known only by their WhatsApp LID, with no phone_number.
+const getWhatsAppIdentifier = (contact) =>
+  contact?.phone_number || contact?.whatsapp_lid || contact?.metadata?.whatsapp_lid || null;
 
 const isAlreadyRegisteredError = (error) => {
   const metaError = error?.response?.data?.error;
@@ -444,7 +451,7 @@ export const sendMessage = async (req, res) => {
 
     if (messageType === 'google_meet') {
       const { default: GoogleAccount } = await import('../models/google-account.model.js');
-      const { getCalendarClient } = await import('../utils/google-api-helper.js');
+      const { getCalendarClient, parseToDate } = await import('../utils/google-api-helper.js');
       const { default: Contact } = await import('../models/contact.model.js');
 
       let query = {
@@ -454,7 +461,11 @@ export const sendMessage = async (req, res) => {
       };
 
       if (google_account_id) {
-        query._id = google_account_id;
+        if (mongoose.Types.ObjectId.isValid(google_account_id)) {
+          query._id = google_account_id;
+        } else {
+          query.email = google_account_id;
+        }
       }
 
       const googleAccount = await GoogleAccount.findOne(query);
@@ -471,8 +482,12 @@ export const sendMessage = async (req, res) => {
         }
 
         const calendarClient = await getCalendarClient(googleAccount._id);
-        const start = meet_start_time ? new Date(meet_start_time) : new Date();
-        const end = meet_end_time ? new Date(meet_end_time) : new Date(start.getTime() + 60 * 60 * 1000);
+        const start = parseToDate(meet_start_time);
+        const end = parseToDate(meet_end_time);
+
+        if (end.getTime() <= start.getTime()) {
+          end.setTime(start.getTime() + 60 * 60 * 1000);
+        }
 
         const event = await calendarClient.events.insert({
           calendarId: 'primary',
@@ -1201,7 +1216,7 @@ export const sendMessage = async (req, res) => {
       if (!contact) {
         return res.status(404).json({ success: false, error: 'Contact not found' });
       }
-      const allowed = await getAgentAllowedPhoneNumber(req.user.id, contact.phone_number, whatsappPhoneNumberId);
+      const allowed = await getAgentAllowedPhoneNumber(req.user.id, getWhatsAppIdentifier(contact), whatsappPhoneNumberId);
       if (!allowed) {
         return res.status(403).json({
           success: false,
@@ -1513,7 +1528,7 @@ export const getContactProfile = async (req, res) => {
       message_type: { $in: ['image', 'audio', 'video', 'document', 'location'] }
     }).lean();
 
-    const contactIdentifier = contact.phone_number || contact.telegram_chat_id || contact.instagram_scoped_id || contact.facebook_page_scoped_id;
+    const contactIdentifier = getWhatsAppIdentifier(contact) || contact.telegram_chat_id || contact.instagram_scoped_id || contact.facebook_page_scoped_id;
 
     if (allMessages.length === 0 && contactIdentifier && myPhoneNumber) {
       allMessages = await Message.find({
@@ -1947,6 +1962,7 @@ export const getMessages = async (req, res) => {
 
       const enrichedMessages = reversedMessages.map(message => ({
         ...message,
+        file_url: message.file_url ? businessApiProvider.getPublicMediaUrl(message.file_url) : message.file_url,
         can_chat: canChat,
         contact_id: contact._id.toString()
       }));
@@ -2039,7 +2055,7 @@ export const getMessages = async (req, res) => {
     }
 
     if (req.user.role === 'agent') {
-      const allowed = await getAgentAllowedPhoneNumber(req.user.id, contact.phone_number, resolvedWhatsappPhoneNumberId);
+      const allowed = await getAgentAllowedPhoneNumber(req.user.id, getWhatsAppIdentifier(contact), resolvedWhatsappPhoneNumberId);
       if (!allowed) {
         return res.status(403).json({
           success: false,
@@ -2064,7 +2080,7 @@ export const getMessages = async (req, res) => {
 
     const messagesResult = await unifiedWhatsAppService.getMessages(
       userId,
-      contact.phone_number,
+      getWhatsAppIdentifier(contact),
       providerType,
       connectionId,
       whatsappPhoneNumber,
@@ -2632,6 +2648,7 @@ export const getRecentChats = async (req, res) => {
             id: contactIdStr,
             number: displayName,
             name: chat.contact.name || number,
+            phone_number: number,
             avatar: chat.contact.avatar || null,
             chat_status: chat.contact.chat_status || 'open',
             source: chat.contact.source || 'whatsapp'
@@ -3172,6 +3189,7 @@ export const getRecentChats = async (req, res) => {
             id: contactId,
             number: displayName,
             name: contactInfo.name,
+            phone_number: chat.contact.number,
             is_pinned: isPinned,
             is_snoozed: isSnoozed,
             chat_status: contactInfo.chat_status || 'open',
@@ -3206,6 +3224,7 @@ export const getRecentChats = async (req, res) => {
             id: contactId,
             number: displayName,
             name: contactInfo.name,
+            phone_number: chat.contact.number,
             is_pinned: isPinned,
             is_snoozed: isSnoozed,
             chat_status: contactInfo.chat_status || 'open',
@@ -3314,7 +3333,7 @@ export const getRecentChats = async (req, res) => {
       });
 
       if (agentIdFilter || isAssignedFilter === true) {
-        filteredChats = filteredChats.filter(chat => relevantNumbers.has(chat.contact.number));
+        filteredChats = filteredChats.filter(chat => relevantNumbers.has(chat.contact.phone_number || chat.contact.number));
       } else if (isAssignedFilter === false) {
         const allAssignedNumbers = await ChatAssignment.find({
           whatsapp_phone_number_id: resolvedWhatsappPhoneNumberId,
@@ -3327,7 +3346,7 @@ export const getRecentChats = async (req, res) => {
           });
           return set;
         });
-        filteredChats = filteredChats.filter(chat => !allAssignedNumbers.has(chat.contact.number));
+        filteredChats = filteredChats.filter(chat => !allAssignedNumbers.has(chat.contact.phone_number || chat.contact.number));
       }
     }
 
@@ -3838,27 +3857,42 @@ export const getEmbbededSignupConnection = async (req, res) => {
       });
     }
 
-    // if (!isCoexistence) {
-    //   try {
-    //     await axios.post(
-    //       `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${signupData.phone_number_id}/register`,
-    //       {
-    //         messaging_product: "whatsapp",
-    //         pin: signupData.pin || req.body.pin || process.env.WHATSAPP_DEFAULT_PIN || "123456"
-    //       },
-    //       {
-    //         headers: {
-    //           Authorization: `Bearer ${accessToken}`,
-    //           'Content-Type': 'application/json'
-    //         }
-    //       }
-    //     );
-    //   } catch (regErr) {
-    //     if (!isAlreadyRegisteredError(regErr)) {
-    //       throw regErr;
-    //     }
-    //   }
-    // }
+    if (!isCoexistence) {
+      const pin = signupData.pin || req.body.pin || process.env.WHATSAPP_DEFAULT_PIN || '123456';
+
+      if (!pin) {
+        return res.status(400).json({
+          success: false,
+          error: 'A 6-digit PIN is required to register the WhatsApp phone number.'
+        });
+      }
+
+      try {
+        await axios.post(
+          `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${signupData.phone_number_id}/register`,
+          {
+            messaging_product: "whatsapp",
+            pin
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+      } catch (regErr) {
+        if (!isAlreadyRegisteredError(regErr)) {
+          throw regErr;
+        }
+      }
+    }
+
+    try {
+      await syncWabaAndPhoneStatus(waba._id);
+    } catch (syncErr) {
+      console.error('Initial status sync failed after embedded signup:', syncErr.message);
+    }
 
     return res.json({
       success: true,
@@ -3909,6 +3943,16 @@ export const getUserConnections = async (req, res) => {
 
     const enrichedWabas = await Promise.all(
       wabas.map(async (waba) => {
+        if (waba.provider !== 'baileys' && waba.access_token) {
+          try {
+            await syncWabaAndPhoneStatus(waba._id);
+          } catch (syncErr) {
+            console.error(`Status sync failed during getUserConnections for WABA ${waba._id}:`, syncErr.message);
+          }
+        }
+
+        const updatedWaba = await WhatsappWaba.findById(waba._id).lean();
+
         const phoneNumbers = await WhatsappPhoneNumber.find({
           user_id: userId,
           waba_id: waba._id,
@@ -3917,58 +3961,36 @@ export const getUserConnections = async (req, res) => {
           .sort({ created_at: -1 })
           .lean();
 
-        const enrichedPhoneNumbers = await Promise.all(
-          phoneNumbers.map(async (phone) => {
-            let verified_name = phone.verified_name;
-            let quality_rating = phone.quality_rating;
-
-            if (waba.provider !== 'baileys') {
-              try {
-                const response = await axios.get(
-                  `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${phone.phone_number_id}`,
-                  {
-                    params: {
-                      fields: 'verified_name,quality_rating'
-                    },
-                    headers: {
-                      Authorization: `Bearer ${waba.access_token}`
-                    }
-                  }
-                );
-                verified_name = response.data.verified_name || verified_name;
-                quality_rating = response.data.quality_rating || quality_rating;
-              } catch (err) {
-                console.error(
-                  `Failed to fetch WhatsApp details for ${phone.phone_number_id}`,
-                  err.message
-                );
-              }
-            }
-
-            return {
-              id: phone._id.toString(),
-              phone_number_id: phone.phone_number_id,
-              display_phone_number: phone.display_phone_number,
-              verified_name,
-              quality_rating,
-              is_active: phone.is_active,
-              created_at: phone.created_at,
-              updated_at: phone.updated_at
-            };
-          })
-        );
+        const enrichedPhoneNumbers = phoneNumbers.map((phone) => {
+          return {
+            id: phone._id.toString(),
+            phone_number_id: phone.phone_number_id,
+            display_phone_number: phone.display_phone_number,
+            verified_name: phone.verified_name,
+            quality_rating: phone.quality_rating,
+            name_status: phone.name_status,
+            code_verification_status: phone.code_verification_status,
+            status: phone.status,
+            rejection_reason: phone.rejection_reason,
+            is_active: phone.is_active,
+            created_at: phone.created_at,
+            updated_at: phone.updated_at
+          };
+        });
 
         return {
-          id: waba._id.toString(),
-          name: waba.name,
-          whatsapp_business_account_id: waba.whatsapp_business_account_id,
-          app_id: waba.app_id,
-          access_token: waba.access_token ? '***' : null,
-          is_active: waba.is_active,
+          id: updatedWaba._id.toString(),
+          name: updatedWaba.name,
+          whatsapp_business_account_id: updatedWaba.whatsapp_business_account_id,
+          app_id: updatedWaba.app_id,
+          access_token: updatedWaba.access_token ? '***' : null,
+          is_active: updatedWaba.is_active,
+          account_review_status: updatedWaba.account_review_status,
+          business_verification_status: updatedWaba.business_verification_status,
           phone_numbers: enrichedPhoneNumbers,
           phone_numbers_count: enrichedPhoneNumbers.length,
-          created_at: waba.created_at,
-          updated_at: waba.updated_at
+          created_at: updatedWaba.created_at,
+          updated_at: updatedWaba.updated_at
         };
       })
     );
@@ -4133,6 +4155,14 @@ export const getWabaPhoneNumbers = async (req, res) => {
       return res.status(404).json({ success: false, error: 'WABA not found' });
     }
 
+    if (waba.provider !== 'baileys' && waba.access_token) {
+      try {
+        await syncWabaAndPhoneStatus(waba._id);
+      } catch (syncErr) {
+        console.error(`Status sync failed during getWabaPhoneNumbers for WABA ${waba._id}:`, syncErr.message);
+      }
+    }
+
     const phoneNumbers = await WhatsappPhoneNumber.find({
       user_id: userId,
       waba_id: waba._id,
@@ -4141,46 +4171,20 @@ export const getWabaPhoneNumbers = async (req, res) => {
       .sort({ created_at: -1 })
       .lean();
 
-    const enrichedPhoneNumbers = [];
-
-    await Promise.all(
-      phoneNumbers.map(async (phone) => {
-        let verified_name = phone.verified_name;
-        let quality_rating = phone.quality_rating;
-
-        if (waba.provider !== 'baileys' && waba.access_token) {
-          try {
-            const response = await axios.get(
-              `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${phone.phone_number_id}`,
-              {
-                params: {
-                  fields: 'verified_name,quality_rating'
-                },
-                headers: {
-                  Authorization: `Bearer ${waba.access_token}`
-                }
-              }
-            );
-            verified_name = response.data.verified_name || verified_name;
-            quality_rating = response.data.quality_rating || quality_rating;
-          } catch (err) {
-            console.error(
-              `Failed to fetch WhatsApp details for ${phone.phone_number_id}`,
-              err.message
-            );
-          }
-        }
-
-        enrichedPhoneNumbers.push({
-          id: phone._id.toString(),
-          phone_number_id: phone.phone_number_id,
-          verified_name: verified_name ?? "N/A",
-          quality_rating: quality_rating ?? "N/A",
-          display_phone_number: phone.display_phone_number,
-          is_primary: phone.is_primary || false
-        });
-      })
-    );
+    const enrichedPhoneNumbers = phoneNumbers.map((phone) => {
+      return {
+        id: phone._id.toString(),
+        phone_number_id: phone.phone_number_id,
+        verified_name: phone.verified_name ?? "N/A",
+        quality_rating: phone.quality_rating ?? "N/A",
+        display_phone_number: phone.display_phone_number,
+        name_status: phone.name_status,
+        code_verification_status: phone.code_verification_status,
+        status: phone.status,
+        rejection_reason: phone.rejection_reason,
+        is_primary: phone.is_primary || false
+      };
+    });
 
     const sortedPhoneNumbers = enrichedPhoneNumbers.sort((a, b) => {
       if (a.is_primary && !b.is_primary) return -1;
@@ -4499,7 +4503,7 @@ const sendMultipleMediaUrls = async (params, res) => {
 
         const messageParams = {
           contactId: contact._id,
-          recipientNumber: contact.phone_number,
+          recipientNumber: getWhatsAppIdentifier(contact),
           messageText: fileCaption,
           messageType: mediaType,
           file,
@@ -4538,7 +4542,7 @@ const sendMultipleMediaUrls = async (params, res) => {
         const fileCaption = messageText || undefined;
 
         const messageParams = {
-          recipientNumber: contact.phone_number,
+          recipientNumber: getWhatsAppIdentifier(contact),
           messageText: fileCaption,
           messageType: mediaType,
           mediaUrl: mediaUrl,
@@ -4891,7 +4895,7 @@ export const getMessageLogs = async (req, res) => {
           provider: msg.provider,
           type: msg.message_type,
           content: msg.content || (msg.file_url ? 'Media File' : ''),
-          status: msg.wa_status || msg.delivery_status,
+          status: msg.direction === 'inbound' ? 'delivered' : (msg.wa_status || msg.delivery_status),
           error: msg.wa_status === 'failed' ? (msg.metadata?.error || 'Unknown error') : null,
           sent_at: msg.created_at
         })),
@@ -4940,7 +4944,7 @@ export const clearChat = async (req, res) => {
     if (platform === 'baileys') {
       platform = 'whatsapp';
     }
-    const contactNumber = contact.phone_number || contact.telegram_chat_id || contact.facebook_page_scoped_id || contact.instagram_scoped_id;
+    const contactNumber = getWhatsAppIdentifier(contact) || contact.telegram_chat_id || contact.facebook_page_scoped_id || contact.instagram_scoped_id;
 
     let myPhoneNumber = contactNumber;
     let senderId = null;

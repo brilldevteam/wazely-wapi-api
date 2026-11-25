@@ -1,12 +1,34 @@
 import { Message, ChatNote, User, ChatAssignment, WhatsappConnection, Contact, Tag, WhatsappPhoneNumber, Role, ContactTag } from '../models/index.js';
 import mongoose from 'mongoose';
 
-const validateWhatsAppConnection = async (userId) => {
-  const connection = await WhatsappConnection.findOne({
+const validateWhatsAppConnection = async (userId, preferredIdentifier = null) => {
+  let query = {
     user_id: userId,
     is_active: true,
     deleted_at: null
-  });
+  };
+
+  if (preferredIdentifier) {
+    if (mongoose.Types.ObjectId.isValid(preferredIdentifier)) {
+      query._id = preferredIdentifier;
+    } else if (typeof preferredIdentifier === 'string') {
+      const cleanPhone = preferredIdentifier.replace(/\D/g, '');
+      if (cleanPhone) {
+        query.registred_phone_number = new RegExp(cleanPhone + '$');
+      }
+    }
+  }
+
+  let connection = await WhatsappConnection.findOne(query).sort({ is_primary: -1, created_at: 1 });
+
+  // Fallback to primary / oldest active connection if specific preferred one not found
+  if (!connection && preferredIdentifier) {
+    connection = await WhatsappConnection.findOne({
+      user_id: userId,
+      is_active: true,
+      deleted_at: null
+    }).sort({ is_primary: -1, created_at: 1 });
+  }
 
   if (!connection) {
     return {
@@ -58,6 +80,8 @@ const fetchUniqueContactNumbers = async (myPhoneNumber) => {
   const receivedMessages = await Message.distinct('sender_number', {
     recipient_number: myPhoneNumber,
     sender_number: { $ne: null },
+
+    
     deleted_at: null
   });
 
@@ -130,7 +154,8 @@ export const getRecentChats = async (req, res) => {
     const limit = parseInt(req.query.limit) || 15;
     const skip = (page - 1) * limit;
 
-    const connectionStatus = await validateWhatsAppConnection(userId);
+    const preferredConn = req.query.connection_id || req.query.phone_number || req.headers['x-connection-id'];
+    const connectionStatus = await validateWhatsAppConnection(userId, preferredConn);
     if (!connectionStatus.isConnected) {
       return res.status(400).json({
         success: false,
@@ -578,7 +603,8 @@ export const getChatLabels = async (req, res) => {
       });
     }
 
-    const connectionStatus = await validateWhatsAppConnection(userId);
+    const preferredConn = req.query.connection_id || req.headers['x-connection-id'];
+    const connectionStatus = await validateWhatsAppConnection(userId, preferredConn);
     if (!connectionStatus.isConnected) {
       return res.status(400).json({
         success: false,
@@ -671,7 +697,8 @@ export const getChatNotes = async (req, res) => {
       });
     }
 
-    const connectionStatus = await validateWhatsAppConnection(userId);
+    const preferredConn = req.query.connection_id || req.headers['x-connection-id'];
+    const connectionStatus = await validateWhatsAppConnection(userId, preferredConn);
     if (!connectionStatus.isConnected) {
       return res.status(400).json({
         success: false,
@@ -703,6 +730,18 @@ export const getChatNotes = async (req, res) => {
     });
   }
 };
+
+// The number a chat is stored under. QR (Baileys) contacts can be known only by their
+// WhatsApp LID (no phone_number); their messages and assignments use that LID.
+const getChatIdentifier = (contact) =>
+  contact?.phone_number ||
+  contact?.whatsapp_lid ||
+  contact?.metadata?.whatsapp_lid ||
+  contact?.facebook_page_scoped_id ||
+  contact?.instagram_scoped_id ||
+  contact?.telegram_chat_id ||
+  contact?.twitter_user_id ||
+  null;
 
 export const assignChatToAgent = async (req, res) => {
   try {
@@ -743,7 +782,7 @@ export const assignChatToAgent = async (req, res) => {
       businessPhoneNumber = phoneNumber.display_phone_number;
     }
 
-    const contactPhoneNumber = contact.phone_number || contact.facebook_page_scoped_id || contact.instagram_scoped_id || contact.telegram_chat_id || contact.twitter_user_id;
+    const contactPhoneNumber = getChatIdentifier(contact);
     const sender_number = contactPhoneNumber;
     const receiver_number = businessPhoneNumber;
 
@@ -847,7 +886,7 @@ export const unassignChatFromAgent = async (req, res) => {
       businessPhoneNumber = phoneNumber.display_phone_number;
     }
 
-    const contactPhoneNumber = contact.phone_number || contact.facebook_page_scoped_id || contact.instagram_scoped_id || contact.telegram_chat_id || contact.twitter_user_id;
+    const contactPhoneNumber = getChatIdentifier(contact);
     
     if (!contactPhoneNumber) {
       return res.status(400).json({
@@ -939,12 +978,15 @@ export const updateChatStatus = async (req, res) => {
     contact.chat_status = status;
     await contact.save();
 
-    if (status === 'resolved') {
+    const chatIdentifier = getChatIdentifier(contact);
+    if (!chatIdentifier) {
+      // nothing to update
+    } else if (status === 'resolved') {
       await ChatAssignment.updateMany(
         {
           $or: [
-            { sender_number: contact.phone_number },
-            { receiver_number: contact.phone_number }
+            { sender_number: chatIdentifier },
+            { receiver_number: chatIdentifier }
           ],
           status: 'assigned'
         },
@@ -954,8 +996,8 @@ export const updateChatStatus = async (req, res) => {
       await ChatAssignment.updateMany(
         {
           $or: [
-            { sender_number: contact.phone_number },
-            { receiver_number: contact.phone_number }
+            { sender_number: chatIdentifier },
+            { receiver_number: chatIdentifier }
           ],
           status: 'assigned'
         },

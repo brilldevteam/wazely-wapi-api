@@ -30,7 +30,23 @@ app.use(session({
   }
 }));
 
-app.use(
+app.use((req, res, next) => {
+  const isWidgetOrSnippet = 
+    req.path.endsWith("widget.js") || 
+    req.path.endsWith("plan-snippet.js") ||
+    (req.path.includes("/plan-snippets/") && req.path.endsWith("/data")) ||
+    (req.path.startsWith("/api/widgets/") && !req.path.startsWith("/api/widgets/phone/"));
+
+  if (isWidgetOrSnippet) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    if (req.method === "OPTIONS") {
+      return res.sendStatus(200);
+    }
+    return next();
+  }
+
   cors({
     origin: function (origin, callback) {
       const allowedOrigins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS : [];
@@ -42,11 +58,11 @@ app.use(
       }
     },
     credentials: true,
-  })
-);
+  })(req, res, next);
+});
 
 const captureRawBody = (req, res, next) => {
-  const isLegacyWebhook = req.originalUrl === "/api/webhook/stripe" || req.originalUrl === "/api/webhook/razorpay" || req.originalUrl === "/api/webhook/paypal";
+  const isLegacyWebhook = req.originalUrl === "/api/webhook/stripe" || req.originalUrl === "/api/webhook/razorpay" || req.originalUrl === "/api/webhook/paypal" || req.originalUrl === "/api/webhook/midtrans" || req.originalUrl === "/api/webhook/mollie";
   const isPaymentWebhook = req.originalUrl.startsWith("/api/payments/webhook/");
 
   if (isLegacyWebhook || isPaymentWebhook) {
@@ -68,15 +84,17 @@ const captureRawBody = (req, res, next) => {
 app.use(captureRawBody);
 app.use(rtInit);
 
-import { handleStripeWebhook, handleRazorpayWebhook, handlePayPalWebhook } from "./controllers/webhook.controller.js";
+import { handleStripeWebhook, handleRazorpayWebhook, handlePayPalWebhook, handleMidtransWebhook, handleMollieWebhook } from "./controllers/webhook.controller.js";
 app.post("/api/webhook/stripe", handleStripeWebhook);
 app.post("/api/webhook/razorpay", handleRazorpayWebhook);
 app.post("/api/webhook/paypal", handlePayPalWebhook);
+app.post("/api/webhook/midtrans", handleMidtransWebhook);
+app.post("/api/webhook/mollie", handleMollieWebhook);
 
 app.use("/webhook/facebook/leadgen", facebookLeadRoutes);
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 app.use('/install', express.static(path.join(__dirname, 'public/install')));
 
@@ -151,6 +169,8 @@ import facebookRoutes from "./routes/facebook.routes.js";
 import facebookAdRoutes from "./routes/facebook-ad-campaign.routes.js";
 import facebookLeadRoutes from "./routes/facebook-lead.routes.js";
 import omnichannelConnectionRoutes from "./routes/omnichannel-connection.routes.js";
+import socialMediaConnectionRoutes from "./routes/social-media-connection.routes.js";
+import socialPublishRoutes from "./routes/social-publish.routes.js";
 
 
 import wabaConfigurationRoutes from "./routes/waba-configuration.routes.js";
@@ -267,6 +287,8 @@ app.use("/api/facebook", facebookRoutes);
 app.use("/api/facebook-ads", facebookAdRoutes);
 app.use("/api/facebook-leads", facebookLeadRoutes);
 app.use("/api/channels", omnichannelConnectionRoutes);
+app.use("/api/social-connections", socialMediaConnectionRoutes);
+app.use("/api/social-publish", socialPublishRoutes);
 
 app.use("/api/guides", guideRoutes);
 app.use("/api/self-tenant", selfTenantRoutes);
@@ -309,9 +331,9 @@ app.get("/instagram-callback", (req, res) => {
   const state = req.query.state;
   const error = req.query.error;
   const error_reason = req.query.error_reason;
-  
+
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-  
+
   if (code) {
     res.redirect(`${frontendUrl}/instagram-callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`);
   } else if (error) {

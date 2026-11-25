@@ -7,7 +7,7 @@ const LATEST_LANDING_DATA = {
       {
         title: "Home",
         link_type: "Link",
-        path: "/landing",
+        path: "/",
         status: true
       },
       {
@@ -43,7 +43,7 @@ const LATEST_LANDING_DATA = {
       {
         title: "Pricing",
         link_type: "Link",
-        path: "/landing#pricing",
+        path: "/#pricing",
         status: true
       }
     ]

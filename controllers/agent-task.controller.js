@@ -1,6 +1,18 @@
 import { AgentTask, User, Role } from '../models/index.js';
 import mongoose from 'mongoose';
 
+// req.user.role_id is a populated document, so compare role names instead of ids.
+// Agents see tasks assigned to them; everyone else (except super admin) sees only
+// tasks they created.
+const idOf = (v) => (v && v._id ? v._id : v)?.toString();
+const canAccessTask = (task, user) => {
+  if (!task || !user) return false;
+  if (user.role === 'super_admin') return true;
+  if (user.role === 'agent') return idOf(task.agent_id) === String(user.id);
+  return idOf(task.assigned_by) === String(user.id);
+};
+const taskNotFound = (res) => res.status(404).json({ success: false, message: 'AGENT Task not found' });
+
 
 const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 10;
@@ -125,13 +137,10 @@ export const getAllAgentTasks = async (req, res) => {
     let searchQuery = buildSearchQuery(searchTerm);
     const loggedInUser = req.user;
 
-    const agentRole = await Role.findOne({ name: 'agent' });
-    const userRole = await Role.findOne({ name: 'user' });
-
-    if (loggedInUser.role_id.toString() === agentRole._id.toString()) {
+    if (loggedInUser.role === 'agent') {
       searchQuery.agent_id = loggedInUser.id;
 
-    } else if (loggedInUser.role_id.toString() === userRole._id.toString()) {
+    } else if (loggedInUser.role !== 'super_admin') {
       searchQuery.assigned_by = loggedInUser.id;
 
       if (agent_id) {
@@ -201,25 +210,11 @@ export const getAgentTaskById = async (req, res) => {
       });
     }
 
-    const loggedInUser = req.user;
-
-    const agentRole = await Role.findOne({ name: 'agent' });
-    const userRole = await Role.findOne({ name: 'user' });
-
-    if (loggedInUser.role_id.toString() === agentRole._id.toString()) {
-      if (task.agent_id._id.toString() !== loggedInUser.id) {
-        return res.status(403).json({
-          success: false,
-          message: 'You are not authorized to access this task'
-        });
-      }
-    } else if (loggedInUser.role_id.toString() === userRole._id.toString()) {
-      if (task.assigned_by.toString() !== loggedInUser.id) {
-        return res.status(403).json({
-          success: false,
-          message: 'You are not authorized to access this task'
-        });
-      }
+    if (!canAccessTask(task, req.user)) {
+      return res.status(403).json({
+        success: false,
+        message: 'You are not authorized to access this task'
+      });
     }
 
     return res.status(200).json({
@@ -322,6 +317,7 @@ export const updateAgentTask = async (req, res) => {
     }
 
     const existingAgentTask = await AgentTask.findOne({ _id: id, });
+    if (existingAgentTask && !canAccessTask(existingAgentTask, req.user)) return taskNotFound(res);
 
     if (!existingAgentTask) {
       return res.status(404).json({
@@ -440,6 +436,7 @@ export const updateAgentTaskStatus = async (req, res) => {
     }
 
     const task = await AgentTask.findById(id);
+    if (task && !canAccessTask(task, req.user)) return taskNotFound(res);
 
     if (!task) {
       return res.status(404).json({
@@ -492,9 +489,9 @@ export const deleteAgentTask = async (req, res) => {
 
     const { validIds } = validation;
 
-    const existingAgentTasks = await AgentTask.find({
+    const existingAgentTasks = (await AgentTask.find({
       _id: { $in: validIds }
-    });
+    })).filter((task) => canAccessTask(task, req.user));
 
     if (existingAgentTasks.length === 0) {
       return res.status(404).json({
@@ -555,6 +552,7 @@ export const addAgentTaskComment = async (req, res) => {
     }
 
     const task = await AgentTask.findById(id);
+    if (task && !canAccessTask(task, req.user)) return taskNotFound(res);
 
     if (!task) {
       return res.status(404).json({
@@ -620,6 +618,7 @@ export const editAgentTaskComment = async (req, res) => {
     }
 
     const task = await AgentTask.findById(id);
+    if (task && !canAccessTask(task, req.user)) return taskNotFound(res);
 
     if (!task) {
       return res.status(404).json({
@@ -697,6 +696,7 @@ export const deleteAgentTaskComment = async (req, res) => {
     }
 
     const task = await AgentTask.findById(id);
+    if (task && !canAccessTask(task, req.user)) return taskNotFound(res);
 
     if (!task) {
       return res.status(404).json({

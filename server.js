@@ -1,4 +1,6 @@
 import 'dotenv/config';
+// Must stay near the top: hides WhatsApp encryption keys that the QR library logs.
+import './utils/redact-signal-logs.js';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import app from './app.js';
@@ -15,7 +17,12 @@ import statusCronService from './cronjob/status.cronService.js';
 import trialPeriodCronService from './cronjob/trialPeriod.cronService.js';
 import snoozeCronService from './cronjob/snooze.cronService.js';
 // import twitterPollCronService from './cronjob/twitter-poll.cronService.js'; // DISABLED: Twitter not working
+import scheduledPostsCronService from './cronjob/scheduled-posts.cronService.js';
+import whatsappStatusSyncCronService from './cronjob/whatsapp-status-sync.cronService.js';
+import currencyRatesCronService from './cronjob/currency-rates.cronService.js';
+import { startCampaignRecoveryCron } from './cronjob/campaign-recovery.cronService.js';
 import EmailTemplateService from './services/email-template.service.js';
+import { setupSocketSecurity, joinOwnRooms, canJoinRoom } from './utils/socket-security.js';
 
 async function loadStripeKeysFromSettings() {
   try {
@@ -66,6 +73,9 @@ const io = new Server(httpServer, {
   path: '/socket.io',
 });
 
+// Must run before anything emits: login check + per-business delivery.
+setupSocketSecurity(io);
+
 app.set('io', io);
 setContactImportSocketIo(io);
 
@@ -75,6 +85,20 @@ import('./services/whatsapp/unified-whatsapp.service.js').then(module => {
 
 io.on('connection', (socket) => {
   console.log('WebSocket client connected:', socket.id);
+  // Rooms come from the verified login only, never from an id the client sends.
+  joinOwnRooms(socket);
+
+  socket.on('join_room', (room) => {
+    if (canJoinRoom(socket, room)) socket.join(String(room));
+  });
+
+  socket.on('join_user', (uId) => {
+    if (canJoinRoom(socket, uId)) {
+      socket.join(`user_${uId}`);
+      socket.join(String(uId));
+    }
+  });
+
   socket.on('disconnect', () => {
  
   });
@@ -90,6 +114,10 @@ io.on('connection', (socket) => {
     await statusCronService();
     await trialPeriodCronService();
     await snoozeCronService(app);
+    await scheduledPostsCronService();
+    await whatsappStatusSyncCronService();
+    await currencyRatesCronService();
+    startCampaignRecoveryCron();
     // await twitterPollCronService(app); // DISABLED: Twitter not working
     await EmailTemplateService.init();
 
