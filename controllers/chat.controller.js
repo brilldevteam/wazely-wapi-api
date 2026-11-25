@@ -1,7 +1,12 @@
 import { Message, ChatNote, User, ChatAssignment, WhatsappConnection, Contact, Tag, WhatsappPhoneNumber, Role, ContactTag } from '../models/index.js';
 import mongoose from 'mongoose';
 import { getChatIdentifier } from '../utils/chat-identifier.js';
-import { emitChatAssigned } from '../utils/agent-assignment.service.js';
+import { emitChatAssigned, processAssignmentQueue, removeChatFromQueue } from '../utils/agent-assignment.service.js';
+
+// Hands out waiting chats in the background (an agent's slot may have freed up).
+const handOutWaitingChats = (ownerId) => {
+  processAssignmentQueue({ ownerId }).catch((error) => console.error('[assignment-queue] Hand-out failed:', error.message));
+};
 
 const validateWhatsAppConnection = async (userId, preferredIdentifier = null) => {
   let query = {
@@ -809,6 +814,7 @@ export const assignChatToAgent = async (req, res) => {
       if (agent_id) {
         emitChatAssigned({ ownerId: adminId, agentId: agent_id, contact, whatsappPhoneNumberId: actualPhoneId, source: 'manual' });
       }
+      await removeChatFromQueue({ ownerId: adminId, contactId: contact._id, whatsappPhoneNumberId: actualPhoneId });
 
       return res.status(200).json({
         success: true,
@@ -830,6 +836,7 @@ export const assignChatToAgent = async (req, res) => {
     if (agent_id) {
       emitChatAssigned({ ownerId: adminId, agentId: agent_id, contact, whatsappPhoneNumberId: actualPhoneId, source: 'manual' });
     }
+    await removeChatFromQueue({ ownerId: adminId, contactId: contact._id, whatsappPhoneNumberId: actualPhoneId });
 
     return res.status(201).json({
       success: true,
@@ -918,6 +925,7 @@ export const unassignChatFromAgent = async (req, res) => {
     assignment.status = 'unassigned';
     assignment.updated_at = new Date();
     await assignment.save();
+    handOutWaitingChats(adminId);
 
     return res.status(200).json({
       success: true,
@@ -978,6 +986,10 @@ export const updateChatStatus = async (req, res) => {
     contact.chat_status = status;
     await contact.save();
 
+    if (status === 'resolved') {
+      await removeChatFromQueue({ ownerId: userId, contactId: contact._id });
+    }
+
     const chatIdentifier = getChatIdentifier(contact);
     if (!chatIdentifier) {
       // nothing to update
@@ -1004,6 +1016,8 @@ export const updateChatStatus = async (req, res) => {
         { is_solved: false }
       );
     }
+
+    if (status === 'resolved') handOutWaitingChats(userId);
 
     const myPhoneNumber = phoneNumber ? phoneNumber.display_phone_number : whatsapp_phone_number_id;
 

@@ -20,10 +20,12 @@ import snoozeCronService from './cronjob/snooze.cronService.js';
 import scheduledPostsCronService from './cronjob/scheduled-posts.cronService.js';
 import whatsappStatusSyncCronService from './cronjob/whatsapp-status-sync.cronService.js';
 import currencyRatesCronService from './cronjob/currency-rates.cronService.js';
+import assignmentQueueCronService from './cronjob/assignment-queue.cronService.js';
+import { processAssignmentQueue } from './utils/agent-assignment.service.js';
 import { startCampaignRecoveryCron } from './cronjob/campaign-recovery.cronService.js';
 import EmailTemplateService from './services/email-template.service.js';
 import { setupSocketSecurity, joinOwnRooms, canJoinRoom } from './utils/socket-security.js';
-import { initAgentPresence, trackSocketConnect, trackSocketDisconnect, resetPresenceOnStartup } from './utils/agent-presence.js';
+import { initAgentPresence, trackSocketConnect, trackSocketDisconnect, resetPresenceOnStartup, setOnUserCameOnline } from './utils/agent-presence.js';
 
 async function loadStripeKeysFromSettings() {
   try {
@@ -78,6 +80,14 @@ const io = new Server(httpServer, {
 setupSocketSecurity(io);
 // Who is online (used by auto-assignment and the Agents page).
 initAgentPresence(io);
+// Someone came online: give them chats that are waiting for an agent. Wait a few
+// seconds so their screen has finished loading and shows the "New chat assigned" alert.
+const HAND_OUT_AFTER_LOGIN_MS = 3000;
+setOnUserCameOnline(({ ownerId }) => {
+  setTimeout(() => {
+    processAssignmentQueue({ ownerId }).catch((error) => console.error('[assignment-queue] Hand-out after login failed:', error.message));
+  }, HAND_OUT_AFTER_LOGIN_MS);
+});
 
 app.set('io', io);
 setContactImportSocketIo(io);
@@ -123,6 +133,7 @@ io.on('connection', (socket) => {
     await scheduledPostsCronService();
     await whatsappStatusSyncCronService();
     await currencyRatesCronService();
+    await assignmentQueueCronService();
     startCampaignRecoveryCron();
     // await twitterPollCronService(app); // DISABLED: Twitter not working
     await EmailTemplateService.init();

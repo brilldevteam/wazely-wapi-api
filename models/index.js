@@ -48,6 +48,7 @@ import InstagramConnection from './instagram-connection.model.js';
 import TwitterConnection from './twitter-connection.model.js'; // DISABLED: Twitter not working (kept as stub)
 
 import ChatAssignment from './chat-assignment.model.js';
+import AssignmentQueue from './assignment-queue.model.js';
 import Template from './template.model.js';
 import Webhook from './webhook.model.js';
 import Contact from './contact.model.js';
@@ -149,6 +150,7 @@ const db = {
   TwitterConnection,
 
   ChatAssignment,
+  AssignmentQueue,
   Template,
   Webhook,
   Contact,
@@ -254,5 +256,5 @@ export {
   FacebookLeadForm,
   FacebookLead,
   Segment,
-  Plan, Template, Webhook, Subscription, PaymentHistory, AIModel, AgentTask, AutomationFlow, AutomationExecution, TelegramConnection, FacebookConnection, InstagramConnection, TwitterConnection, ChatAssignment, Contact, CustomField, Tag, Attachment, Campaign, UserSetting, EcommerceCatalog, EcommerceProduct, EcommerceOrder, EcommerceOrderStatusTemplate, LandingPage, AuthPageSetup, ApiKey, Widget, ShortLink, ImportJob, ReplyMaterial, WorkingHours, Workspace, Sequence, SequenceStep, WabaConfiguration, Tax, GoogleAccount, GoogleCalendar, GoogleSheet, GoogleForm, QuickReply, QuickReplyFavorite, KanbanFunnel, KanbanItem, Guide, SocialAutomation, SocialMediaPost, SocialMediaConnection, ProcessedSocialComment, CookieConsentLog, ShopifyConfiguration, PlanSnippet, connectDB
+  Plan, Template, Webhook, Subscription, PaymentHistory, AIModel, AgentTask, AutomationFlow, AutomationExecution, TelegramConnection, FacebookConnection, InstagramConnection, TwitterConnection, ChatAssignment, AssignmentQueue, Contact, CustomField, Tag, Attachment, Campaign, UserSetting, EcommerceCatalog, EcommerceProduct, EcommerceOrder, EcommerceOrderStatusTemplate, LandingPage, AuthPageSetup, ApiKey, Widget, ShortLink, ImportJob, ReplyMaterial, WorkingHours, Workspace, Sequence, SequenceStep, WabaConfiguration, Tax, GoogleAccount, GoogleCalendar, GoogleSheet, GoogleForm, QuickReply, QuickReplyFavorite, KanbanFunnel, KanbanItem, Guide, SocialAutomation, SocialMediaPost, SocialMediaConnection, ProcessedSocialComment, CookieConsentLog, ShopifyConfiguration, PlanSnippet, connectDB
 };

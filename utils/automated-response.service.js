@@ -1010,7 +1010,7 @@ export const assignRoundRobin = async (userId, contactId, whatsappPhoneNumberId)
             source: 'round_robin'
         });
         if (result.assigned) console.log(`[round-robin] Assigned agent ${result.agentId} to contact ${contactId}`);
-        else if (!result.kept) console.log(`[round-robin] Contact ${contactId} left unassigned: ${result.reason}`);
+        else if (!result.kept) console.log(`[round-robin] Contact ${contactId} not assigned: ${result.reason}${result.queued ? ' (waiting for an agent)' : ''}`);
         return result;
     } catch (error) {
         console.error('Error in assignRoundRobin:', error);

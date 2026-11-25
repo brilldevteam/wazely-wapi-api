@@ -68,6 +68,26 @@ const wabaConfigurationSchema = new mongoose.Schema({
     round_robin_assignment: {
         type: Boolean,
         default: false
+    },
+    // Auto-assignment rules (used by Sequential assignment and flow "Assign Random Agent" steps).
+    // When nobody is available, keep the chat waiting and hand it out when an agent becomes available.
+    assignment_queue_enabled: {
+        type: Boolean,
+        default: true
+    },
+    // How long a chat may wait for an agent before it is left for manual assignment.
+    assignment_wait_hours: {
+        type: Number,
+        default: 6,
+        min: 1,
+        max: 168
+    },
+    // 0 = no limit. Otherwise an agent with this many open chats gets no new auto-assigned chats.
+    max_open_chats_per_agent: {
+        type: Number,
+        default: 0,
+        min: 0,
+        max: 1000
     }
 }, {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },

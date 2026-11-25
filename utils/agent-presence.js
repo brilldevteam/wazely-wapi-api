@@ -21,9 +21,15 @@ export const PRESENCE_EVENT = 'agent:presence';
 const socketsByUser = new Map(); // userId -> Set<socketId>
 const offlineTimers = new Map(); // userId -> Timeout
 let ioRef = null;
+let onUserCameOnline = null;
 
 export const initAgentPresence = (io) => {
   ioRef = io;
+};
+
+/** Called with { userId, ownerId } when someone goes from offline to online (e.g. hand out waiting chats). */
+export const setOnUserCameOnline = (listener) => {
+  onUserCameOnline = listener;
 };
 
 export const getIO = () => ioRef;
@@ -63,6 +69,12 @@ const saveAndBroadcast = async (auth, isOnline) => {
     });
   } catch (error) {
     console.error('[presence] Could not save online status:', error.message);
+  }
+
+  if (isOnline && onUserCameOnline) {
+    Promise.resolve(onUserCameOnline({ userId: auth.userId, ownerId: auth.ownerId })).catch((error) =>
+      console.error('[presence] Came-online handler failed:', error.message)
+    );
   }
 };
 

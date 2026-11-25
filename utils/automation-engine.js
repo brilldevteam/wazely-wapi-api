@@ -4345,8 +4345,9 @@ class AutomationEngine {
       } else if (result.kept) {
         console.log(`[assign_random_agent] ${senderNumber} kept its current handler (${result.reason})`);
       } else {
-        // Nobody online/available (or chat not found): leave it unassigned and let the flow continue.
-        console.log(`[assign_random_agent] Not assigned for ${senderNumber}: ${result.reason}`);
+        // Nobody online/available: the chat waits in the queue (handed out when an agent
+        // becomes available) or stays unassigned. Either way the flow continues.
+        console.log(`[assign_random_agent] Not assigned for ${senderNumber}: ${result.reason}${result.queued ? ' (waiting for an agent)' : ''}`);
       }
 
       return {
@@ -4355,7 +4356,7 @@ class AutomationEngine {
           ...inputData,
           agent_assigned_id: result.agentId || null,
           team_assigned_id: team_id || null,
-          assignment_result: result.assigned ? 'assigned' : result.kept ? 'kept' : result.reason
+          assignment_result: result.assigned ? 'assigned' : result.kept ? 'kept' : result.queued ? 'queued' : result.reason
         }
       };
     } catch (error) {

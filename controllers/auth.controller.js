@@ -8,6 +8,7 @@ import OTPService from '../services/otp.service.js';
 import { getRedisClient } from '../utils/redis.js';
 import EmailTemplateService from '../services/email-template.service.js';
 import { disconnectSocketsForToken, emitPresence, isUserOnline } from '../utils/agent-presence.js';
+import { processAssignmentQueue } from '../utils/agent-assignment.service.js';
 const OTP_LENGTH = 6;
 const OTP_EXPIRATION_MINUTES = 10;
 const DEFAULT_SESSION_EXPIRATION_DAYS = 7;
@@ -1447,12 +1448,18 @@ export const updateAvailability = async (req, res) => {
 
     await User.updateOne({ _id: req.user.id }, { $set: { availability_status: status } });
 
+    const ownerId = req.user.owner_id || req.user.id;
     emitPresence({
       userId: req.user.id,
-      ownerId: req.user.owner_id || req.user.id,
+      ownerId,
       isOnline: isUserOnline(req.user.id),
       availabilityStatus: status
     });
+
+    // Back to Available: hand out chats that are waiting for an agent.
+    if (status === 'available') {
+      processAssignmentQueue({ ownerId }).catch((error) => console.error('[availability] Queue hand-out failed:', error.message));
+    }
 
     return res.status(200).json({
       success: true,

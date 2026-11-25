@@ -9,6 +9,7 @@ const WHATSAPP_JID_SUFFIX = '@s.whatsapp.net';
 import axios from 'axios';
 import { WhatsappConnection, EcommerceProduct } from '../models/index.js';
 import { assignChatToAgent as assignChatToAgentFromChat } from './chat.controller.js';
+import { getWaitingSinceByContact, removeChatFromQueue } from '../utils/agent-assignment.service.js';
 import paymentLinkService from '../services/payment-link.service.js';
 import mongoose from 'mongoose';
 
@@ -2290,6 +2291,11 @@ export const assignChatbot = async (req, res) => {
 
     await contact.save();
 
+    // An AI Agent now handles this chat, so it no longer waits for a human agent.
+    if (contact.assigned_chatbot && !contact.chatbot_paused) {
+      await removeChatFromQueue({ ownerId: userId, contactId: contact._id });
+    }
+
     return res.status(200).json({
       success: true,
       message: 'AI Agent assignment updated successfully',
@@ -2411,6 +2417,19 @@ const parseRecentChatsDate = (dateStr) => {
   if (!dateStr) return null;
   const d = new Date(dateStr);
   return isNaN(d.getTime()) ? null : d;
+};
+
+// Chats waiting in the assignment queue get the time they started waiting ("Waiting" label).
+const attachWaitingSince = async (ownerId, chats) => {
+  if (!chats?.length) return chats;
+  try {
+    const waiting = await getWaitingSinceByContact(ownerId, chats.map((chat) => chat.contact?.id));
+    if (!waiting.size) return chats;
+    return chats.map((chat) => ({ ...chat, assignment_waiting_since: waiting.get(String(chat.contact?.id)) || null }));
+  } catch (error) {
+    console.error('Could not load waiting chats:', error.message);
+    return chats;
+  }
 };
 
 export const getRecentChats = async (req, res) => {
@@ -2886,7 +2905,7 @@ export const getRecentChats = async (req, res) => {
 
       return res.json({
         success: true,
-        data: filteredChats,
+        data: await attachWaitingSince(userId, filteredChats),
         pagination
       });
     }
@@ -3391,7 +3410,7 @@ export const getRecentChats = async (req, res) => {
 
     return res.json({
       success: true,
-      data: filteredChats,
+      data: await attachWaitingSince(userId, filteredChats),
       pagination
     });
   } catch (error) {

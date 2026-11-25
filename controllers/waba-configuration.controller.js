@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { WabaConfiguration, ReplyMaterial, Template, EcommerceCatalog, Chatbot, Sequence, AppointmentConfig } from '../models/index.js';
+import { processAssignmentQueue } from '../utils/agent-assignment.service.js';
 
 
 export const getWabaConfiguration = async (req, res) => {
@@ -142,7 +143,31 @@ export const updateWabaConfiguration = async (req, res) => {
             config.round_robin_assignment = updateData.round_robin_assignment;
         }
 
+        // Auto-assignment rules
+        if (updateData.assignment_queue_enabled !== undefined) {
+            config.assignment_queue_enabled = updateData.assignment_queue_enabled === true || updateData.assignment_queue_enabled === 'true';
+        }
+        if (updateData.assignment_wait_hours !== undefined) {
+            const hours = Number(updateData.assignment_wait_hours);
+            if (!Number.isInteger(hours) || hours < 1 || hours > 168) {
+                return res.status(400).json({ success: false, message: 'Waiting time must be a whole number of hours between 1 and 168 (7 days)' });
+            }
+            config.assignment_wait_hours = hours;
+        }
+        if (updateData.max_open_chats_per_agent !== undefined) {
+            const max = updateData.max_open_chats_per_agent === null ? 0 : Number(updateData.max_open_chats_per_agent);
+            if (!Number.isInteger(max) || max < 0 || max > 1000) {
+                return res.status(400).json({ success: false, message: 'Max open chats per agent must be a whole number between 1 and 1000, or 0 for no limit' });
+            }
+            config.max_open_chats_per_agent = max;
+        }
+
         await config.save();
+
+        // Rules may now allow waiting chats to be handed out (e.g. a higher limit).
+        if (['round_robin_assignment', 'assignment_queue_enabled', 'max_open_chats_per_agent'].some((k) => updateData[k] !== undefined) && req.user?.owner_id) {
+            processAssignmentQueue({ ownerId: req.user.owner_id }).catch((error) => console.error('[assignment-queue] Hand-out after settings change failed:', error.message));
+        }
 
         let populatedConfig = config.toObject();
         const fieldsToPopulate = [
