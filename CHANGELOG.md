@@ -1,5 +1,31 @@
 # Changelog
 
+## Wazely CRM rollout updates - 2026-11-26
+
+### Agent shifts and automatic chat assignment
+- Add reusable agent shifts per business (`/api/agent-shifts`): IANA timezone, working days, up to 6 time ranges per day, overnight ranges and all-day `00:00–24:00`, and an active/inactive status. Overlapping ranges (including overnight and Saturday→Sunday wrap) are rejected; a shift still assigned to agents cannot be deleted. Agents can be given a shift (`shift_id`); an inactive shift pauses automatic assignment for its agents.
+- Rebuild automatic assignment as one shared service used by the flow "Assign Available Agent" and "Assign Agent" steps, keyword-bot "assign agent" replies and the WhatsApp Sequential assignment setting. A chat only goes to an agent who is active, online, set to Available, inside their shift (or has no shift) and below the optional open-chat limit; distribution is round-robin or least open chats; an open chat stays with its agent.
+- Add a persistent waiting queue: when no agent is eligible the chat waits (oldest first per assignment rule, no expiry) and is handed out when an agent comes online, switches to Available, starts their shift or frees a slot, after settings change, and by a 1-minute safety sweep. Chats leave the queue when assigned by hand, resolved, taken by a chatbot/AI Agent, or their contact is deleted. On start-up the old 6-hour queue expiry index is removed.
+- Track who is online from the authenticated socket (30-second grace for refreshes, immediate offline on logout, reset on restart) and add `GET/PUT /auth/availability` for the Available/Away status.
+- Fix the WhatsApp "Sequential assignment" setting, which queried non-existent fields and never assigned anyone; it now runs on every incoming message. Add `assignment_strategy` and `max_open_chats_per_agent` settings.
+- Scope team assignment to the business owner, active teams and agent-role users; include the business owner in "All agents" rotation only when explicitly enabled.
+- Emit `chat:assigned`, `agent:presence` and `chat:queue-updated` socket events so agents get an instant "New chat assigned" alert and lists update live.
+
+### Chats, agents and security
+- Scope chat resolve/reopen to the business's phone and chat (it could previously affect the same customer in another business); assigning a resolved chat reopens it.
+- Stop returning password hashes and reset tokens in the Agents list; return live online state and shift instead.
+- Keep an agent's team and shift unless they are actually changed when editing; reject malformed team and shift IDs with 400.
+- Return clear 400/404 JSON errors for invalid or missing shift IDs and invalid shift data.
+- End the server session on logout and close that login's sockets.
+- Deliver live socket events only to the business they belong to and require an active session on socket connect; send QR connection status updates to their owner.
+- Stop agent tasks leaking across customer accounts.
+- QR (Baileys) chats: fix the empty WA Chat list, scope it to the account, and allow opening, replying to and assigning chats for contacts known only by their WhatsApp LID; always send location name/address.
+
+### Other
+- Update currency exchange rates automatically every day (live rates with the admin rate as fallback), fix conversion for QAR and other unsupported currencies, and add new currencies to the end of the list.
+- Brand the SMTP test email as "Wazely CRM".
+- Hide WhatsApp encryption session dumps from the API logs.
+
 ## WAPI v3.3 custom upgrade - 2026-10-03
 
 - Upgrade the API to the WAPI v3.3 vendor release (social media connections and scheduled publishing, Mollie payments, campaign recovery, WhatsApp status sync, campaign batch stats and resume handling).
