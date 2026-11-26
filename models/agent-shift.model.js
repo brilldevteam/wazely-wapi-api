@@ -1,8 +1,9 @@
 import mongoose from 'mongoose';
+import { END_TIME_RE, START_TIME_RE } from '../utils/agent-shift.js';
 
 const timeRangeSchema = new mongoose.Schema({
-  start: { type: String, required: true, match: /^([01]\d|2[0-3]):[0-5]\d$/ },
-  end: { type: String, required: true, match: /^([01]\d|2[0-3]):[0-5]\d$/ }
+  start: { type: String, required: true, match: START_TIME_RE },
+  end: { type: String, required: true, match: END_TIME_RE }
 }, { _id: false });
 
 const daySchema = new mongoose.Schema({

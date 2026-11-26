@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import mongoose from 'mongoose';
 import { isInsideShift, validateShiftSchedule } from '../utils/agent-shift.js';
+import AgentShift from '../models/agent-shift.model.js';
 
 const schedule = (changes = {}) => ({
   name: 'Night shift', timezone: 'Asia/Qatar', status: 'active', deleted_at: null,
@@ -25,3 +27,16 @@ test('full day range ending at 24:00 is accepted', () => assert.equal(validateSh
 test('full day range covers the final minute', () => assert.equal(isInsideShift(schedule({ monday: { enabled: true, ranges: [{ start: '00:00', end: '24:00' }] } }), new Date('2026-11-23T20:59:00Z')), true));
 test('more than six ranges is rejected', () => assert.match(validateShiftSchedule(schedule({ monday: { enabled: true, ranges: Array.from({ length: 7 }, (_, index) => ({ start: `0${index}:00`, end: `0${index}:30` })) } })), /more than 6/i));
 test('shift names over 100 characters are rejected', () => assert.match(validateShiftSchedule(schedule({ name: 'x'.repeat(101) })), /100/i));
+test('all-day shift saves and reads back through the model', async () => {
+  const databaseName = `wapi_agent_shift_test_${process.pid}_${Date.now()}`;
+  await mongoose.connect(`mongodb://127.0.0.1:27017/${databaseName}`);
+  try {
+    const created = await AgentShift.create({ ...schedule({ monday: { enabled: true, ranges: [{ start: '00:00', end: '24:00' }] } }), user_id: new mongoose.Types.ObjectId() });
+    const saved = await AgentShift.findById(created._id).lean();
+    assert.equal(saved.monday.ranges[0].start, '00:00');
+    assert.equal(saved.monday.ranges[0].end, '24:00');
+  } finally {
+    await mongoose.connection.dropDatabase();
+    await mongoose.disconnect();
+  }
+});

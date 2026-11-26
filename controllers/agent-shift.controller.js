@@ -6,7 +6,9 @@ const ownerId = (req) => req.user?.owner_id || req.user?._id || req.user?.id;
 const invalidId = (id) => !mongoose.Types.ObjectId.isValid(String(id || ''));
 const shiftError = (res, error) => {
   const isValidation = error?.name === 'ValidationError' || error?.name === 'CastError';
-  return res.status(isValidation ? 400 : 500).json({ success: false, message: isValidation ? error.message : 'Could not process shift request' });
+  if (isValidation) console.warn('[agent-shift] Invalid shift data:', error.message);
+  else console.error('[agent-shift] Request failed:', error);
+  return res.status(isValidation ? 400 : 500).json({ success: false, message: isValidation ? 'Invalid shift data' : 'Could not process shift request' });
 };
 const cleanPayload = (body) => {
   const payload = {

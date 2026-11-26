@@ -261,7 +261,7 @@ export const createAgent = async (req, res) => {
         }
 
         if (!mongoose.Types.ObjectId.isValid(team_id)) {
-            return res.status(400).json({ success: false, message: 'Valid Team ID is required' });
+            return res.status(400).json({ success: false, message: 'Invalid team' });
         }
 
         const team = await Team.findOne({
@@ -401,6 +401,7 @@ export const updateAgent = async (req, res) => {
         let team = null;
         const teamWasProvided = Object.prototype.hasOwnProperty.call(req.body, 'team_id');
         if (teamWasProvided && String(team_id || '') !== String(existingAgent.team_id || '')) {
+            if (!mongoose.Types.ObjectId.isValid(team_id)) return res.status(400).json({ success: false, message: 'Invalid team' });
             team = await Team.findOne({ _id: team_id, user_id: agentOwnerId, status: 'active', deleted_at: null });
             if (!team) return res.status(404).json({ success: false, message: 'Active team not found' });
         }

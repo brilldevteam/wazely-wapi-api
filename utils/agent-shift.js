@@ -1,6 +1,6 @@
 const DAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-const START_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
-const END_TIME_RE = /^(?:([01]\d|2[0-3]):[0-5]\d|24:00)$/;
+export const START_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+export const END_TIME_RE = /^(?:([01]\d|2[0-3]):[0-5]\d|24:00)$/;
 const MINUTES_PER_DAY = 1440;
 const MINUTES_PER_WEEK = MINUTES_PER_DAY * 7;
 const MAX_RANGES_PER_DAY = 6;
