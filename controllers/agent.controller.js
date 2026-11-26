@@ -398,10 +398,15 @@ export const updateAgent = async (req, res) => {
         }
 
         const agentOwnerId = existingAgent.created_by || getOwnerId(req.user);
-        const team = await Team.findOne({ _id: team_id, user_id: agentOwnerId, status: 'active', deleted_at: null });
-        if (!team) return res.status(404).json({ success: false, message: 'Active team not found' });
+        let team = null;
+        const teamWasProvided = Object.prototype.hasOwnProperty.call(req.body, 'team_id');
+        if (teamWasProvided && String(team_id || '') !== String(existingAgent.team_id || '')) {
+            team = await Team.findOne({ _id: team_id, user_id: agentOwnerId, status: 'active', deleted_at: null });
+            if (!team) return res.status(404).json({ success: false, message: 'Active team not found' });
+        }
         let shift = null;
-        if (shift_id) {
+        const shiftWasProvided = Object.prototype.hasOwnProperty.call(req.body, 'shift_id');
+        if (shiftWasProvided && shift_id) {
             if (!mongoose.Types.ObjectId.isValid(shift_id)) return res.status(400).json({ success: false, message: 'Invalid shift' });
             shift = await AgentShift.findOne({ _id: shift_id, user_id: agentOwnerId, deleted_at: null });
             if (!shift) return res.status(404).json({ success: false, message: 'Shift not found' });
@@ -437,8 +442,8 @@ export const updateAgent = async (req, res) => {
         existingAgent.country_code = country_code;
         existingAgent.phone = normalizedPhone;
         existingAgent.is_phoneno_hide = is_phoneno_hide;
-        existingAgent.team_id = team._id;
-        existingAgent.shift_id = shift?._id || null;
+        if (teamWasProvided && team) existingAgent.team_id = team._id;
+        if (shiftWasProvided) existingAgent.shift_id = shift?._id || null;
         existingAgent.created_by = existingAgent.created_by || req.user._id;
         existingAgent.role_id = role._id;
 

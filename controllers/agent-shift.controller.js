@@ -3,6 +3,11 @@ import { AgentShift, User } from '../models/index.js';
 import { SHIFT_DAYS, validateShiftSchedule } from '../utils/agent-shift.js';
 
 const ownerId = (req) => req.user?.owner_id || req.user?._id || req.user?.id;
+const invalidId = (id) => !mongoose.Types.ObjectId.isValid(String(id || ''));
+const shiftError = (res, error) => {
+  const isValidation = error?.name === 'ValidationError' || error?.name === 'CastError';
+  return res.status(isValidation ? 400 : 500).json({ success: false, message: isValidation ? error.message : 'Could not process shift request' });
+};
 const cleanPayload = (body) => {
   const payload = {
     name: body.name?.trim(),
@@ -31,9 +36,12 @@ export const listShifts = async (req, res) => {
 };
 
 export const getShift = async (req, res) => {
-  const shift = await AgentShift.findOne({ _id: req.params.id, user_id: ownerId(req), deleted_at: null }).lean();
-  if (!shift) return res.status(404).json({ success: false, message: 'Shift not found' });
-  return res.json({ success: true, data: shift });
+  if (invalidId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid shift ID' });
+  try {
+    const shift = await AgentShift.findOne({ _id: req.params.id, user_id: ownerId(req), deleted_at: null }).lean();
+    if (!shift) return res.status(404).json({ success: false, message: 'Shift not found' });
+    return res.json({ success: true, data: shift });
+  } catch (error) { return shiftError(res, error); }
 };
 
 export const createShift = async (req, res) => {
@@ -44,11 +52,12 @@ export const createShift = async (req, res) => {
     const shift = await AgentShift.create({ ...payload, user_id: ownerId(req) });
     return res.status(201).json({ success: true, message: 'Shift created successfully', data: shift });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return shiftError(res, error);
   }
 };
 
 export const updateShift = async (req, res) => {
+  if (invalidId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid shift ID' });
   try {
     const payload = cleanPayload(req.body || {});
     const validationError = validateShiftSchedule(payload);
@@ -57,19 +66,22 @@ export const updateShift = async (req, res) => {
     if (!shift) return res.status(404).json({ success: false, message: 'Shift not found' });
     return res.json({ success: true, message: 'Shift updated successfully', data: shift });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return shiftError(res, error);
   }
 };
 
 export const deleteShift = async (req, res) => {
-  const filter = { _id: req.params.id, user_id: ownerId(req), deleted_at: null };
-  const shift = await AgentShift.findOne(filter);
-  if (!shift) return res.status(404).json({ success: false, message: 'Shift not found' });
-  const assignedAgents = await User.countDocuments({ created_by: ownerId(req), shift_id: shift._id, deleted_at: null });
-  if (assignedAgents) return res.status(409).json({ success: false, message: `This shift is assigned to ${assignedAgents} agent(s). Reassign them before deleting it.` });
-  shift.deleted_at = new Date();
-  await shift.save();
-  return res.json({ success: true, message: 'Shift deleted successfully' });
+  if (invalidId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid shift ID' });
+  try {
+    const filter = { _id: req.params.id, user_id: ownerId(req), deleted_at: null };
+    const shift = await AgentShift.findOne(filter);
+    if (!shift) return res.status(404).json({ success: false, message: 'Shift not found' });
+    const assignedAgents = await User.countDocuments({ created_by: ownerId(req), shift_id: shift._id, deleted_at: null });
+    if (assignedAgents) return res.status(409).json({ success: false, message: `This shift is assigned to ${assignedAgents} agent(s). Reassign them before deleting it.` });
+    shift.deleted_at = new Date();
+    await shift.save();
+    return res.json({ success: true, message: 'Shift deleted successfully' });
+  } catch (error) { return shiftError(res, error); }
 };
 
 export default { listShifts, getShift, createShift, updateShift, deleteShift };

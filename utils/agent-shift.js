@@ -1,5 +1,9 @@
 const DAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+const START_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+const END_TIME_RE = /^(?:([01]\d|2[0-3]):[0-5]\d|24:00)$/;
+const MINUTES_PER_DAY = 1440;
+const MINUTES_PER_WEEK = MINUTES_PER_DAY * 7;
+const MAX_RANGES_PER_DAY = 6;
 
 export const isValidTimezone = (timezone) => {
   try {
@@ -17,21 +21,31 @@ const minutes = (value) => {
 
 export const validateShiftSchedule = (payload) => {
   if (!payload?.name?.trim()) return 'Shift name is required';
+  if (payload.name.trim().length > 100) return 'Shift name cannot exceed 100 characters';
   if (!isValidTimezone(payload.timezone || 'Asia/Qatar')) return 'Invalid timezone';
 
-  for (const day of DAYS) {
+  const weeklyRanges = [];
+  for (const [dayIndex, day] of DAYS.entries()) {
     const config = payload[day];
     if (!config) continue;
     if (!Array.isArray(config.ranges)) return `${day} ranges must be an array`;
-    const normalRanges = [];
+    if (config.enabled && config.ranges.length === 0) return `${day} must contain at least one time range`;
+    if (config.ranges.length > MAX_RANGES_PER_DAY) return `${day} cannot contain more than ${MAX_RANGES_PER_DAY} time ranges`;
     for (const range of config.ranges) {
-      if (!TIME_RE.test(range?.start || '') || !TIME_RE.test(range?.end || '')) return `${day} contains an invalid time`;
+      if (!START_TIME_RE.test(range?.start || '') || !END_TIME_RE.test(range?.end || '')) return `${day} contains an invalid time`;
       if (range.start === range.end) return `${day} range cannot start and end at the same time`;
-      if (minutes(range.start) < minutes(range.end)) normalRanges.push([minutes(range.start), minutes(range.end)]);
+      const start = dayIndex * MINUTES_PER_DAY + minutes(range.start);
+      let end = dayIndex * MINUTES_PER_DAY + minutes(range.end);
+      if (end <= start) end += MINUTES_PER_DAY;
+      weeklyRanges.push({ day, start, end });
     }
-    normalRanges.sort((a, b) => a[0] - b[0]);
-    for (let i = 1; i < normalRanges.length; i++) {
-      if (normalRanges[i][0] < normalRanges[i - 1][1]) return `${day} contains overlapping time ranges`;
+  }
+
+  const comparable = [...weeklyRanges, ...weeklyRanges.map((range) => ({ ...range, start: range.start + MINUTES_PER_WEEK, end: range.end + MINUTES_PER_WEEK }))]
+    .sort((a, b) => a.start - b.start);
+  for (let i = 1; i < comparable.length; i++) {
+    if (comparable[i].start < comparable[i - 1].end && comparable[i].start < MINUTES_PER_WEEK * 2) {
+      return `${comparable[i].day} contains an overlapping time range`;
     }
   }
   return null;

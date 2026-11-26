@@ -31,7 +31,6 @@ export const QUEUE_UPDATED_EVENT = 'chat:queue-updated';
 
 export const DEFAULT_ASSIGNMENT_SETTINGS = Object.freeze({ maxOpenChats: 0, strategy: 'round_robin' });
 const WAITING_REASONS = ['no_available_agent', 'agents_at_limit'];
-const QUEUE_BATCH_SIZE = 500;
 
 const isActiveUser = (user) => !!user && user.status === true && !user.deleted_at;
 
@@ -424,17 +423,17 @@ export const autoAssignChat = (params) => {
 
 /** Hands out one business's waiting chats, oldest first. Caller holds the owner lock. */
 const drainOwnerQueue = async (ownerId) => {
-  const entries = await AssignmentQueue.find({ user_id: ownerId })
-    .sort({ created_at: 1, _id: 1 })
-    .limit(QUEUE_BATCH_SIZE)
-    .lean();
-
-  const blockedRules = new Set();
+  const rules = await AssignmentQueue.aggregate([
+    { $match: { user_id: new mongoose.Types.ObjectId(String(ownerId)) } },
+    { $group: { _id: { team_id: '$team_id', include_owner: '$include_owner' }, oldest: { $min: '$created_at' } } },
+    { $sort: { oldest: 1 } }
+  ]);
   let assigned = 0;
 
-  for (const entry of entries) {
-    const ruleKey = entry.team_id ? `team:${entry.team_id}` : `all:${entry.include_owner}`;
-    if (blockedRules.has(ruleKey)) continue;
+  for (const rule of rules) {
+    const ruleFilter = { user_id: ownerId, include_owner: !!rule._id.include_owner, team_id: rule._id.team_id || null };
+    const entries = await AssignmentQueue.find(ruleFilter).sort({ created_at: 1, _id: 1 }).lean();
+    for (const entry of entries) {
 
     let result;
     try {
@@ -459,12 +458,13 @@ const drainOwnerQueue = async (ownerId) => {
       assigned++;
     } else if (WAITING_REASONS.includes(result.reason)) {
       // Nobody free for this rule right now: later chats with the same rule can't be served either.
-      blockedRules.add(ruleKey);
       await AssignmentQueue.updateOne({ _id: entry._id }, { $inc: { attempts: 1 }, $set: { last_attempt_at: new Date() } });
+      break;
     } else if (!result.kept) {
       // Chat gone, resolved, contact deleted or the team has no agents: stop waiting.
       const removed = await AssignmentQueue.deleteOne({ _id: entry._id });
       if (removed.deletedCount) emitQueueUpdated(ownerId);
+    }
     }
   }
 

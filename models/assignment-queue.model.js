@@ -31,6 +31,7 @@ const assignmentQueueSchema = new mongoose.Schema({
 
 assignmentQueueSchema.index({ user_id: 1, whatsapp_phone_number_id: 1, contact_identifier: 1 }, { unique: true });
 assignmentQueueSchema.index({ user_id: 1, created_at: 1 });
+assignmentQueueSchema.index({ user_id: 1, team_id: 1, include_owner: 1, created_at: 1 });
 assignmentQueueSchema.index({ contact_id: 1 });
 
 export default mongoose.model('AssignmentQueue', assignmentQueueSchema);
